@@ -1,0 +1,36 @@
+# @package _group_
+
+# Specifies the environment's name and the Python class to instantiate.
+name: "IsaacLabEnv"
+env_cls: "rlinf.envs.isaaclab.isaaclab_env.IsaacLabEnv"
+
+# Standard RLinf environment settings that control the simulation behavior.
+seed: 42
+auto_reset: True
+ignore_terminations: False
+record_metrics: True
+
+# --- Isaac Lab Specific Configuration ---
+# This nested dictionary contains all parameters required by the IsaacLabEnv wrapper.
+isaaclab:
+  # The name of the task as registered in your Isaac Lab environment setup.
+  # IMPORTANT: Please verify this name matches your task registration exactly.
+  # Based on your files, this is a likely name.
+  task_name: "Isaac-PickPlace-Surgical-G129-Dex3-Joint"
+
+  # Number of parallel environments to simulate.
+  # This will be passed to your Isaac Lab task configuration.
+  num_envs: 1
+
+  # Run Isaac Sim in headless mode (no GUI). Set to False for local debugging.
+  headless: True
+
+  # The natural language instruction provided to the VLA model.
+  # This should describe the goal of the task.
+  task_description: "pick up the surgical tool and place it on the tray"
+
+  # Whether to include the robot's proprioceptive state (joint positions, etc.)
+  # in the observation dictionary passed to the model.
+  use_proprio: True
+
+  device: "cuda"
