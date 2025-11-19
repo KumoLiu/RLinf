@@ -98,14 +98,31 @@ class ObservationsCfg:
 class TerminationsCfg:
     time_out = DoneTerm(func=mdp.time_out, time_out=True)
 
-def dummy_reward(env):
-    """Simple dummy reward function that returns zero for all environments"""
-    return torch.zeros(env.num_envs, device=env.device, dtype=torch.float)
 
 @configclass
 class RewardsCfg:
-    pass
-    reward = RewTerm(func=dummy_reward,weight=1.0)
+    lift_trocars = RewTerm(
+        func=mdp.lift_trocars_reward,
+        weight=2.0,
+        params={
+            "table_height": 0.85483,
+            "lift_threshold": 0.05,
+            "asset_cfg1": SceneEntityCfg("trocar_1"),
+            "asset_cfg2": SceneEntityCfg("trocar_2"),
+        }
+    )
+    
+    insert_trocars = RewTerm(
+        func=mdp.trocar_insertion_reward,
+        weight=5.0,
+        params={
+            "dist_std": 0.1,
+            "angle_std": 0.2,
+            "angle_threshold": 0.15, # ~8.6 degrees tolerance
+            "asset_cfg1": SceneEntityCfg("trocar_1"),
+            "asset_cfg2": SceneEntityCfg("trocar_2"),
+        }
+    )
 
 @configclass
 class EventCfg:

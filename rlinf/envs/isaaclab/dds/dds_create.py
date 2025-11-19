@@ -17,24 +17,6 @@ def create_dds_objects(args_cli,env):
         dds_manager.register_object("dex3", dex3)
         publish_names.append("dex3")
         subscribe_names.append("dex3")
-    elif args_cli.enable_dex1_dds:
-        from dds.gripper_dds import GripperDDS
-        gripper = GripperDDS()
-        dds_manager.register_object("dex1", gripper)
-        publish_names.append("dex1")
-        subscribe_names.append("dex1")
-    elif args_cli.enable_inspire_dds:
-        from dds.inspire_dds import InspireDDS
-        inspire = InspireDDS()
-        dds_manager.register_object("inspire", inspire)
-        publish_names.append("inspire")
-        subscribe_names.append("inspire")
-    if "Wholebody" in args_cli.task or args_cli.enable_wholebody_dds:
-        from dds.commands_dds import RunCommandDDS
-        run_command_dds = RunCommandDDS()
-        dds_manager.register_object("run_command", run_command_dds)
-        publish_names.append("run_command")
-        subscribe_names.append("run_command")
     from dds.reset_pose_dds import ResetPoseCmdDDS
     reset_pose_dds = ResetPoseCmdDDS()
     dds_manager.register_object("reset_pose", reset_pose_dds)
@@ -67,18 +49,6 @@ def create_dds_objects_replay(args_cli,env):
         dds_manager.register_object("dex3", dex3)
         publish_names.append("dex3")
         subscribe_names.append("dex3")
-    elif args_cli.enable_dex1_dds:
-        from dds.gripper_dds import GripperDDS
-        gripper = GripperDDS()
-        dds_manager.register_object("dex1", gripper)
-        publish_names.append("dex1")
-        subscribe_names.append("dex1")
-    elif args_cli.enable_inspire_dds:
-        from dds.inspire_dds import InspireDDS
-        inspire = InspireDDS()
-        dds_manager.register_object("inspire", inspire)
-        publish_names.append("inspire")
-        subscribe_names.append("inspire")
 
     dds_manager.start_publishing(publish_names)
     dds_manager.start_subscribing(subscribe_names)

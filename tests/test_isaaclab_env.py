@@ -25,7 +25,7 @@ class TestIsaacLabEnv(unittest.TestCase):
             'record_metrics': True,
             'isaaclab': {
                 'task_name': 'Isaac-PickPlace-Surgical-G129-Dex3-Joint',
-                'num_envs': 2,
+                'num_envs': 1,
                 'headless': False,
                 'device': 'cuda',
                 'task_description': 'test description for pick and place',
