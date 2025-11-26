@@ -209,6 +209,15 @@ class IsaacLabEnv(gym.Env):
             truncations = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
             return obs, rewards, terminations, truncations, infos
 
+        obs, _reward, terminations, truncations, infos = self.env.step(actions)
+        print('*********reward*********', _reward)
+        # For Debug, Only record table image with the first batch
+        img = ((obs["camera_images"]["front_camera"][0] + 1) * 127.5).clamp(0, 255).to(torch.uint8)
+        self.images.append(img.cpu().numpy())
+
+        obs = self._wrap_obs(obs)
+
+
         raw_next_obs, rewards, terminations, truncations, infos = self.env.step(actions)
         print('****** raw_next_obs', type(raw_next_obs))
         print('****** raw_next_obs[0]', type(raw_next_obs[0]))

@@ -1,7 +1,11 @@
 # Copyright (c) 2025, Unitree Robotics Co., Ltd. All Rights Reserved.
 # License: Apache License, Version 2.0  
+
+import tempfile
 import torch
 from dataclasses import MISSING
+
+
 
 import isaaclab.envs.mdp as base_mdp
 from isaaclab.assets import ArticulationCfg
@@ -15,29 +19,17 @@ from isaaclab.managers import RewardTermCfg as RewTerm
 from isaaclab.utils import configclass
 
 from . import mdp
+# use Isaac Lab native event system
 
-from ..common_config import G1RobotPresets, CameraPresets  # isort: skip
-from ..common_event.event_manager import SimpleEvent, SimpleEventManager
-from ..common_scene.base_scene_pickplace_surgical import SurgicalSceneCfg
+from tasks.common_config import  G1RobotPresets, CameraPresets  # isort: skip
+from tasks.common_event.event_manager import SimpleEvent, SimpleEventManager
+
+# import public scene configuration
+from tasks.common_scene.base_scene_pickplace_surgical import SurgicalSceneCfg
 
 ##
 # Scene definition
 ##
-@configclass
-class ObjectTableSceneCfg(SurgicalSceneCfg):
-    """object table scene configuration class
-    
-    inherits from G1SingleObjectSceneCfg, gets the complete G1 robot scene configuration
-    can add task-specific scene elements or override default configurations here
-    """
-    
-    # Humanoid robot w/ arms higher
-    # humanoid robot configuration 
-    robot: ArticulationCfg = G1RobotPresets.g1_29dof_dex3_base_fix(init_pos=(-1.91882, 1.94, 0.81168), init_rot=(1.0, 0, 0, 0.0))
-    # add camera configuration 
-    front_camera = CameraPresets.g1_front_camera()
-    left_wrist_camera = CameraPresets.left_dex3_wrist_camera()
-    right_wrist_camera = CameraPresets.right_dex3_wrist_camera()
 
 ##
 # MDP settings
@@ -62,9 +54,12 @@ class ObservationsCfg:
         """
 
         # 1. robot joint state observation
-        robot_joint_state = ObsTerm(func=mdp.get_robot_boy_joint_states, params={"enable_dds": False})
+        robot_joint_state = ObsTerm(func=mdp.get_robot_boy_joint_states)
         # 2. gripper joint state observation 
-        robot_gipper_state = ObsTerm(func=mdp.get_robot_dex3_joint_states, params={"enable_dds": False})
+        robot_gipper_state = ObsTerm(func=mdp.get_robot_dex3_joint_states)
+
+        # 3. camera image observation
+        camera_image = ObsTerm(func=mdp.get_camera_image)
 
         def __post_init__(self):
             """post initialization function
@@ -72,7 +67,6 @@ class ObservationsCfg:
             """
             self.enable_corruption = False  # disable observation value corruption
             self.concatenate_terms = False  # disable observation item connection
-
     @configclass
     class CameraImagesCfg(ObsGroup):
         """Observations from the robot's cameras."""
@@ -94,9 +88,23 @@ class ObservationsCfg:
     policy: PolicyCfg = PolicyCfg()
     camera_images: CameraImagesCfg = CameraImagesCfg()
 
+
 @configclass
 class TerminationsCfg:
+    """Termination conditions for the environment."""
+    
+    # Time out termination
     time_out = DoneTerm(func=mdp.time_out, time_out=True)
+    
+    # Task success termination (all stages completed)
+    task_success = DoneTerm(
+        func=mdp.task_success_termination,
+        time_out=False,  # This is a success termination, not a failure
+        params={
+            "asset_cfg1": SceneEntityCfg("trocar_1"),
+            "asset_cfg2": SceneEntityCfg("trocar_2"),
+        }
+    )
 
 
 @configclass
@@ -123,11 +131,35 @@ class RewardsCfg:
             "asset_cfg2": SceneEntityCfg("trocar_2"),
         }
     )
+    
+    placement_trocars = RewTerm(
+        func=mdp.trocar_placement_reward,
+        weight=1.0,
+        params={
+            "x_min": -1.8,
+            "x_max": -1.4,
+            "y_min": 1.5,
+            "y_max": 1.8,
+            "asset_cfg1": SceneEntityCfg("trocar_1"),
+            "asset_cfg2": SceneEntityCfg("trocar_2"),
+        }
+    )
 
 @configclass
 class EventCfg:
-    pass
-    # reset_scene = EventTermCfg(func=mdp.reset_scene_to_default, mode="reset")
+    """Event configuration for scene reset."""
+    
+    # # Reset scene when episode terminates (timeout or success)
+    # reset_scene = EventTermCfg(
+    #     func=base_mdp.reset_scene_to_default,
+    #     mode="reset"
+    # )
+    
+    # # Reset task stage tracker when environment resets
+    # reset_task_stage = EventTermCfg(
+    #     func=mdp.reset_task_stage,
+    #     mode="reset"
+    # )
     # reset_object = EventTermCfg(
     #     func=mdp.reset_root_state_uniform,  # use uniform distribution reset function
     #     mode="reset",   # set event mode to reset
@@ -151,13 +183,12 @@ class PickPlaceG129DEX3JointEnvCfg(ManagerBasedRLEnvCfg):
     inherits from ManagerBasedRLEnvCfg, defines all configuration parameters for the entire environment
     """
 
-    # scene settings
-    scene: ObjectTableSceneCfg = ObjectTableSceneCfg(
-        num_envs=1,
-        env_spacing=2.5,
-        replicate_physics=True
-    )
-    # viewer settings
+    # 1. scene settings
+    scene: ObjectTableSceneCfg = ObjectTableSceneCfg(num_envs=1, # environment number: 1
+                                                     env_spacing=2.5, # environment spacing: 2.5 meter
+                                                     replicate_physics=True # enable physics replication
+                                                     )
+    # 2. viewer settings
     viewer: ViewerCfg = ViewerCfg(
         eye=(-1.9, 1.90, 1.20101),
         lookat=(-1.2, 1.9, 0.6),
@@ -167,12 +198,12 @@ class PickPlaceG129DEX3JointEnvCfg(ManagerBasedRLEnvCfg):
     observations: ObservationsCfg = ObservationsCfg()   # observation configuration
     actions: ActionsCfg = ActionsCfg()                  # action configuration
     # MDP settings
+    # MDP settings
     terminations: TerminationsCfg = TerminationsCfg()    # termination configuration
     events = EventCfg()                                  # event configuration
     commands = None # command manager
     rewards: RewardsCfg = RewardsCfg()  # reward manager
     curriculum = None # curriculum manager
-
     def __post_init__(self):
         """Post initialization."""
         # general settings
@@ -182,7 +213,6 @@ class PickPlaceG129DEX3JointEnvCfg(ManagerBasedRLEnvCfg):
         self.sim.dt = 1/200
         self.sim.render_interval = self.decimation
         self.sim.physx.bounce_threshold_velocity = 0.01
-
         self.sim.render.enable_translucency = True
         self.sim.render.carb_settings = {
             "rtx.raytracing.fractionalCutoutOpacity": True,

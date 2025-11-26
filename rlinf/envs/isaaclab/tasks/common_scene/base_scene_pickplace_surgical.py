@@ -11,42 +11,69 @@ from isaaclab.sim.spawners.from_files.from_files_cfg import GroundPlaneCfg, UsdF
 from isaaclab.utils import configclass
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 from isaacsim.core.utils.torch.rotations import euler_angles_to_quats
-from ..common_config import   CameraBaseCfg  # isort: skip
+from tasks.common_config import   CameraBaseCfg  # isort: skip
 import os
-
+import torch
 project_root = os.environ.get("PROJECT_ROOT")
 usd_root = "/yunl/assets"
 # usd_root = "/mnt/hdd/Data"
-# usd_root = "/home/nvidia/workspace/yunl/assets"
-
+usd_root = "/home/nvidia/workspace/yunl/assets"
 @configclass
 class SurgicalSceneCfg(InteractiveSceneCfg): # inherit from the interactive scene configuration class
     """object table scene configuration class
     defines a complete scene containing robot, object, table, etc.
     """
-      # room wall configuration - simplified configuration to avoid rigid body property conflicts
+      # 1. room wall configuration - simplified configuration to avoid rigid body property conflicts
     scene = AssetBaseCfg(
         prim_path="/World/envs/env_.*/Scene",
         spawn=UsdFileCfg(
             usd_path=f"{usd_root}/lw_v2/scene.usd",  # use simple room model
         ),
     )
-    
+
+    # trocar_1 = RigidObjectCfg(
+    #     prim_path="/World/envs/env_.*/Scene/Trocar002",
+    #     init_state=RigidObjectCfg.InitialStateCfg(
+    #         pos=[-1.55953, 2.00288, 0.85483],
+    #         rot=[0.17602, -0.70516, 0.18787, 0.66066]
+    #     ),
+    # )
+    # trocar_2 = RigidObjectCfg(
+    #     prim_path="/World/envs/env_.*/Scene/DisposableLaparoscopicPunctureDevice001",
+    #     init_state=RigidObjectCfg.InitialStateCfg(
+    #         pos=[-1.52635, 2.09436, 0.85483],
+    #         rot=[0.63046, -0.59294, -0.33848, 0.36928]
+    #     ),
+    # )
+    # Trocar 1 (Base/Right object) - Spawned from separate USD file
     trocar_1 = RigidObjectCfg(
         prim_path="/World/envs/env_.*/Scene/Trocar002",
+        spawn=UsdFileCfg(
+            usd_path=f"{usd_root}/lw_v2/Assets/Trocar002/Trocar002.usd",
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(
+                rigid_body_enabled=True,
+            ),
+        ),
         init_state=RigidObjectCfg.InitialStateCfg(
             pos=[-1.55953, 2.00288, 0.85483],
             rot=[0.17602, -0.70516, 0.18787, 0.66066]
         ),
     )
+    
+    # Trocar 2 (Held/Left object) - Spawned from separate USD file
     trocar_2 = RigidObjectCfg(
-        prim_path="/World/envs/env_.*/Scene/DisposableLaparoscopicPunctureDevice001",
+        prim_path="/World/envs/env_.*/trocar_2",
+        spawn=UsdFileCfg(
+            usd_path=f"{usd_root}/lw_v2/Assets/DisposableLaparoscopicPunctureDevice001/DisposableLaparoscopicPunctureDevice003.usd",
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(
+                rigid_body_enabled=True,
+            ),
+        ),
         init_state=RigidObjectCfg.InitialStateCfg(
             pos=[-1.52635, 2.09436, 0.85483],
             rot=[0.63046, -0.59294, -0.33848, 0.36928]
         ),
     )
-
     
     # Lights
     light = AssetBaseCfg(
@@ -54,3 +81,4 @@ class SurgicalSceneCfg(InteractiveSceneCfg): # inherit from the interactive scen
         spawn=sim_utils.DomeLightCfg(color=(0.75, 0.75, 0.75), # light color (white)
                                      intensity=1000.0),    # light intensity
     )
+
