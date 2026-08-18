@@ -933,7 +933,7 @@ def masked_normalization(
         )
     mean = x_sum / factor
     meansq = x_sum_sq / factor
-    var = meansq - mean**2
+    var = (meansq - mean**2).clamp_min(0.0)
     if unbiased:
         var *= factor / (factor - 1)
     return ((x - mean) / (var.sqrt() + eps)).float()

@@ -70,6 +70,23 @@ def convert_maniskill_obs_to_gr00t_format(env_obs):
     return groot_obs
 
 
+def convert_g1_dex3_obs_to_gr00t_format(env_obs):
+    """Convert DreamDojo G1 observations to the fine-tuned GR00T schema."""
+    images = env_obs["main_images"]
+    states = env_obs["states"]
+    if states.shape[-1] != 28:
+        raise ValueError(f"Expected 28-D G1 state, got {states.shape[-1]}")
+    groot_obs = {
+        "video.head_view": images.unsqueeze(1).cpu().numpy(),
+        "state.left_arm": states.unsqueeze(1)[:, :, 0:7].cpu().numpy(),
+        "state.right_arm": states.unsqueeze(1)[:, :, 7:14].cpu().numpy(),
+        "state.left_hand": states.unsqueeze(1)[:, :, 14:21].cpu().numpy(),
+        "state.right_hand": states.unsqueeze(1)[:, :, 21:28].cpu().numpy(),
+        "annotation.human.task_description": env_obs["task_descriptions"],
+    }
+    return groot_obs
+
+
 def convert_to_libero_action_n1d5(
     action_chunk: dict[str, np.array], chunk_size: int = 1
 ) -> np.ndarray:
@@ -208,10 +225,36 @@ def convert_to_isaaclab_stack_cube_action(
     return action_array
 
 
+def convert_to_g1_dex3_action(
+    action_chunk: dict[str, np.ndarray],
+    chunk_size: int = 25,
+) -> np.ndarray:
+    """Convert decoded GR00T G1 joint targets to a 28-D action array."""
+    component_names = ("left_arm", "right_arm", "left_hand", "right_hand")
+    prefixed_keys = tuple(f"action.{name}" for name in component_names)
+    if all(key in action_chunk for key in prefixed_keys):
+        keys = prefixed_keys
+    elif all(key in action_chunk for key in component_names):
+        keys = component_names
+    else:
+        raise KeyError(
+            "Expected bare or action-prefixed G1 keys; available keys: "
+            f"{list(action_chunk)}"
+        )
+    action_array = np.concatenate(
+        [action_chunk[key][:, :chunk_size] for key in keys],
+        axis=-1,
+    )
+    if action_array.shape[-1] != 28:
+        raise ValueError(f"Expected 28-D G1 action, got {action_array.shape[-1]}")
+    return action_array
+
+
 OBS_CONVERSION = {
     "maniskill": convert_maniskill_obs_to_gr00t_format,
     "libero": convert_libero_obs_to_gr00t_format,
     "isaaclab_stack_cube": convert_libero_obs_to_gr00t_format,
+    "g1_dex3": convert_g1_dex3_obs_to_gr00t_format,
 }
 
 ACTION_CONVERSION_N1D5 = {
@@ -230,6 +273,7 @@ ACTION_CONVERSION_N1D7 = {
     "libero": convert_to_libero_action_n1d7,
     "maniskill": convert_to_maniskill_action,
     "isaaclab_stack_cube": convert_to_isaaclab_stack_cube_action,
+    "g1_dex3": convert_to_g1_dex3_action,
 }
 
 
