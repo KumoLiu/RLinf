@@ -41,6 +41,97 @@ def convert_libero_obs_to_gr00t_format(env_obs):
     return groot_obs
 
 
+def convert_g1_dex3_wm_obs_to_gr00t_format(env_obs):
+    """Convert a world-model env obs (head cam only) to GR00T N1.7 g1_dex3 format.
+
+    Matches the modality config at
+    ``examples/g1-dex3/g1_dex3_head_config.py`` on the ``yunl/pick-trocar``
+    branch of KumoLiu/Isaac-GR00T:
+
+    * video key  : ``head_view`` (single ego camera, no wrist views)
+    * state keys : ``left_arm(7) + right_arm(7) + left_hand(7) + right_hand(7)``
+    * action keys: same 4 groups (handled at action-decode time, not here)
+    * language   : ``annotation.human.task_description`` (**not** the LIBERO
+                   ``annotation.human.action.task_description`` variant)
+
+    Args:
+        env_obs: Dict emitted by :meth:`DreamDojoEnv._wrap_obs` with keys
+            ``main_images`` ``[B, H, W, 3]`` uint8 tensor,
+            ``wrist_images`` (``None`` for this setup),
+            ``states`` ``[B, 28]`` float tensor laid out
+            ``[left_arm(0:7), right_arm(7:14), left_hand(14:21), right_hand(21:28)]``,
+            ``task_descriptions`` list of ``B`` strings.
+    """
+    groot_obs = {}
+
+    main_images = env_obs["main_images"]
+    if isinstance(main_images, torch.Tensor):
+        main_images_np = main_images.cpu().numpy()
+    else:
+        main_images_np = np.asarray(main_images)
+    # [B, H, W, C] -> [B, T=1, H, W, C]
+    groot_obs["video.head_view"] = main_images_np[:, None, ...]
+
+    states = env_obs["states"]
+    if isinstance(states, torch.Tensor):
+        states_np = states.detach().cpu().numpy()
+    else:
+        states_np = np.asarray(states)
+    if states_np.ndim != 2 or states_np.shape[1] != 28:
+        raise ValueError(
+            f"g1_dex3 expects states of shape [B, 28], got {states_np.shape}"
+        )
+    # [B, 28] -> [B, T=1, 7] per component
+    groot_obs["state.left_arm"] = states_np[:, None, 0:7]
+    groot_obs["state.right_arm"] = states_np[:, None, 7:14]
+    groot_obs["state.left_hand"] = states_np[:, None, 14:21]
+    groot_obs["state.right_hand"] = states_np[:, None, 21:28]
+
+    groot_obs["annotation.human.task_description"] = env_obs["task_descriptions"]
+    return groot_obs
+
+
+def convert_to_g1_dex3_action_n1d7(
+    action_chunk: dict[str, np.ndarray],
+    chunk_size: int = 16,
+) -> np.ndarray:
+    """Concat GR00T N1.7 g1_dex3 action-chunk dict into a flat 28-D action array.
+
+    Expected keys (from the ``g1_dex3_head_config`` action ``modality_keys``)::
+
+        action.left_arm   : [B, T, 7]   (RELATIVE / delta joint targets)
+        action.right_arm  : [B, T, 7]   (RELATIVE)
+        action.left_hand  : [B, T, 7]   (ABSOLUTE joint positions)
+        action.right_hand : [B, T, 7]   (ABSOLUTE)
+
+    The arm/hand representation split (relative arms + absolute hands) must be
+    preserved by whatever consumes the returned array (world-model env, real
+    robot bridge). :func:`rlinf.envs.action_utils.prepare_actions` should
+    branch on ``env_type == DREAMDOJOWM`` and pass this array through
+    unchanged.
+    """
+    try:
+        left_arm = action_chunk["action.left_arm"][:, :chunk_size]
+        right_arm = action_chunk["action.right_arm"][:, :chunk_size]
+        left_hand = action_chunk["action.left_hand"][:, :chunk_size]
+        right_hand = action_chunk["action.right_hand"][:, :chunk_size]
+    except KeyError as e:
+        raise KeyError(
+            "convert_to_g1_dex3_action_n1d7 requires action_chunk to contain "
+            "action.left_arm / action.right_arm / action.left_hand / "
+            f"action.right_hand; got keys {list(action_chunk.keys())}"
+        ) from e
+
+    action_array = np.concatenate(
+        [left_arm, right_arm, left_hand, right_hand], axis=-1
+    )
+    if action_array.shape[-1] != 28:
+        raise ValueError(
+            f"Expected 28-D g1_dex3 action, got {action_array.shape[-1]}"
+        )
+    return action_array
+
+
 def convert_maniskill_obs_to_gr00t_format(env_obs):
     """
     Convert the observation to the format expected by GR00T models.
