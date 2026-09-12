@@ -40,6 +40,8 @@ Expected LeRobot v2.1 layout (matches ``pick_trocar_teleop_success_*``)::
 from __future__ import annotations
 
 import json
+from bisect import bisect_right
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, Optional
 
@@ -77,11 +79,13 @@ class LeRobotV21InitDataset(Dataset):
             ``None``, uses every episode listed in ``meta/info.json``. Useful
             for restricting to a train/val split without moving files.
         random_start_frame: When ``True``, ``__getitem__`` samples a random
-            start frame in ``[0, episode_length - kir_context_len - 1]``
-            instead of always using frame 0. Recommended ``False`` for the
-            first version so all episodes seed the WM from the true initial
-            robot pose.
+            start frame in ``[history_frame_offset,
+            episode_length - kir_context_len - 1]`` instead of always using
+            ``history_frame_offset``.
         video_backend: ``"decord"`` (default, fast + zero-copy) or ``"pyav"``.
+        history_frame_offset: Raw-frame distance from the condition image to
+            the historical action/state baseline. Zero preserves the default
+            frame-zero reset; DreamDojo's 30-to-15 Hz bridge uses two.
     """
 
     def __init__(
@@ -97,6 +101,7 @@ class LeRobotV21InitDataset(Dataset):
         episodes: Optional[list[int]] = None,
         random_start_frame: bool = False,
         video_backend: str = "decord",
+        history_frame_offset: int = 0,
     ):
         self.root = Path(data_path).expanduser().resolve()
         if not (self.root / "meta").is_dir():
@@ -112,6 +117,9 @@ class LeRobotV21InitDataset(Dataset):
         self.image_size = tuple(image_size) if image_size is not None else None
         self.random_start_frame = bool(random_start_frame)
         self.video_backend = video_backend
+        self.history_frame_offset = int(history_frame_offset)
+        if self.history_frame_offset < 0:
+            raise ValueError("history_frame_offset must be non-negative")
 
         # ---- Load meta ----
         with (self.root / "meta" / "info.json").open() as f:
@@ -134,8 +142,12 @@ class LeRobotV21InitDataset(Dataset):
         self.video_original_key = video_meta.get("original_key", self.video_key)
 
         # State/action component slices (e.g. {"left_arm": slice(0, 7), ...}).
-        self.state_slices = self._extract_component_slices(self.modality.get("state", {}))
-        self.action_slices = self._extract_component_slices(self.modality.get("action", {}))
+        self.state_slices = self._extract_component_slices(
+            self.modality.get("state", {})
+        )
+        self.action_slices = self._extract_component_slices(
+            self.modality.get("action", {})
+        )
 
         # ---- task_index -> text ----
         self.task_texts: dict[int, str] = {}
@@ -192,10 +204,14 @@ class LeRobotV21InitDataset(Dataset):
 
         # Pick the start frame.
         max_start = max(0, ep_length - self.kir_context_len - 1)
-        if self.random_start_frame and max_start > 0:
-            start_frame = int(np.random.randint(0, max_start + 1))
+        if max_start < self.history_frame_offset:
+            raise ValueError(f"Episode {ep_idx} is too short for the requested history")
+        if self.random_start_frame and max_start > self.history_frame_offset:
+            start_frame = int(
+                np.random.randint(self.history_frame_offset, max_start + 1)
+            )
         else:
-            start_frame = 0
+            start_frame = self.history_frame_offset
 
         # Compute the frame indices we need to decode.
         wanted_indices: list[int] = [start_frame]
@@ -210,17 +226,27 @@ class LeRobotV21InitDataset(Dataset):
         if "tasks" in ep_meta and ep_meta["tasks"]:
             task_text = str(ep_meta["tasks"][0])
         else:
-            task_indices = table.column("task_index").to_pylist() if "task_index" in table.schema.names else []
+            task_indices = (
+                table.column("task_index").to_pylist()
+                if "task_index" in table.schema.names
+                else []
+            )
             if task_indices:
                 task_text = self.task_texts.get(int(task_indices[0]), "")
 
         # Decode images for the requested frames.
         video_path = self._video_path(ep_idx)
-        frames_uint8 = self._decode_video_frames(video_path, wanted_indices)  # (T, H, W, 3) uint8
+        frames_uint8 = self._decode_video_frames(
+            video_path, wanted_indices
+        )  # (T, H, W, 3) uint8
 
         # Extract state / action rows.
-        state_all = self._table_column_as_array(table, "observation.state")  # (N, state_dim) or None
-        action_all = self._table_column_as_array(table, "action")            # (N, action_dim) or None
+        state_all = self._table_column_as_array(
+            table, "observation.state"
+        )  # (N, state_dim) or None
+        action_all = self._table_column_as_array(
+            table, "action"
+        )  # (N, action_dim) or None
         if state_all is not None:
             assert state_all.shape[1] == self.state_dim, (
                 f"state_dim mismatch: config expects {self.state_dim}, parquet has "
@@ -234,7 +260,9 @@ class LeRobotV21InitDataset(Dataset):
 
         # Build the per-frame dicts.
         def _frame_dict(local_pos: int, absolute_frame: int) -> dict[str, Any]:
-            img = self._prepare_image(frames_uint8[local_pos])  # tensor [3, H, W] float [0,1]
+            img = self._prepare_image(
+                frames_uint8[local_pos]
+            )  # tensor [3, H, W] float [0,1]
             state_vec = (
                 torch.from_numpy(state_all[absolute_frame]).float()
                 if state_all is not None
@@ -256,6 +284,18 @@ class LeRobotV21InitDataset(Dataset):
             }
 
         start_items = [_frame_dict(0, wanted_indices[0])]
+        if self.history_frame_offset:
+            if state_all is None or action_all is None:
+                raise ValueError(
+                    "World-model history requires real state and action columns"
+                )
+            baseline_frame = start_frame - self.history_frame_offset
+            start_items[0]["wm_previous_action"] = torch.from_numpy(
+                action_all[baseline_frame]
+            ).float()
+            start_items[0]["wm_previous_state"] = torch.from_numpy(
+                state_all[baseline_frame]
+            ).float()
         target_items: list[dict[str, Any]] = []
         if self.enable_kir and self.kir_context_len > 0:
             for local_pos, abs_frame in enumerate(wanted_indices[1:], start=1):
@@ -286,9 +326,7 @@ class LeRobotV21InitDataset(Dataset):
 
     def _parquet_path(self, episode_index: int) -> Path:
         chunk = episode_index // self.chunks_size
-        rel = self.data_tmpl.format(
-            episode_chunk=chunk, episode_index=episode_index
-        )
+        rel = self.data_tmpl.format(episode_chunk=chunk, episode_index=episode_index)
         return (self.root / rel).resolve()
 
     def _video_path(self, episode_index: int) -> Path:
@@ -353,10 +391,8 @@ class LeRobotV21InitDataset(Dataset):
             try:
                 import av  # type: ignore
             except ImportError as e:
-                raise ImportError(
-                    "pyav is required for video_backend='pyav'."
-                ) from e
-            wanted = set(int(fi) for fi in frame_indices)
+                raise ImportError("pyav is required for video_backend='pyav'.") from e
+            wanted = {int(fi) for fi in frame_indices}
             decoded: dict[int, np.ndarray] = {}
             with av.open(str(video_path)) as container:
                 stream = container.streams.video[0]
@@ -366,7 +402,9 @@ class LeRobotV21InitDataset(Dataset):
                         decoded[i] = frame.to_ndarray(format="rgb24")
                         if len(decoded) == len(wanted):
                             break
-            return np.stack([decoded[min(max(0, int(fi)), max(decoded))] for fi in frame_indices])
+            return np.stack(
+                [decoded[min(max(0, int(fi)), max(decoded))] for fi in frame_indices]
+            )
 
         raise ValueError(f"Unknown video_backend={self.video_backend!r}")
 
@@ -381,3 +419,68 @@ class LeRobotV21InitDataset(Dataset):
                 align_corners=False,
             ).squeeze(0)
         return img
+
+
+class MixedLeRobotV21InitDataset(Dataset):
+    """Concatenate LeRobot reset datasets with source-balanced sampling."""
+
+    def __init__(
+        self,
+        data_paths: Sequence[str],
+        *,
+        mixing_weights: Optional[Sequence[float]] = None,
+        **dataset_kwargs,
+    ) -> None:
+        if not data_paths:
+            raise ValueError("At least one LeRobot dataset path is required")
+        self.datasets = [
+            LeRobotV21InitDataset(path, **dataset_kwargs) for path in data_paths
+        ]
+        self.offsets = [0]
+        for dataset in self.datasets:
+            self.offsets.append(self.offsets[-1] + len(dataset))
+
+        if mixing_weights is None:
+            mixing_weights = [1.0 / len(self.datasets)] * len(self.datasets)
+        if len(mixing_weights) != len(self.datasets):
+            raise ValueError(
+                "mixing_weights must contain one value per dataset: "
+                f"{len(mixing_weights)} != {len(self.datasets)}"
+            )
+        self.mixing_weights = torch.tensor(mixing_weights, dtype=torch.float64)
+        if (self.mixing_weights < 0).any() or self.mixing_weights.sum() <= 0:
+            raise ValueError("mixing_weights must be non-negative with positive sum")
+        self.mixing_weights /= self.mixing_weights.sum()
+
+    def __len__(self) -> int:
+        return self.offsets[-1]
+
+    def __getitem__(self, index: int) -> dict[str, Any]:
+        source_index = bisect_right(self.offsets, int(index)) - 1
+        if source_index < 0 or source_index >= len(self.datasets):
+            raise IndexError(index)
+        local_index = int(index) - self.offsets[source_index]
+        item = self.datasets[source_index][local_index]
+        item["dataset_meta"]["source_index"] = source_index
+        item["dataset_meta"]["source_path"] = str(self.datasets[source_index].root)
+        return item
+
+    def sample_indices(self, count: int, generator: torch.Generator) -> list[int]:
+        """Sample flat indices by source weight, then uniformly within source."""
+        source_indices = torch.multinomial(
+            self.mixing_weights,
+            count,
+            replacement=True,
+            generator=generator,
+        )
+        indices = []
+        for source_index in source_indices.tolist():
+            local_index = int(
+                torch.randint(
+                    len(self.datasets[source_index]),
+                    (1,),
+                    generator=generator,
+                ).item()
+            )
+            indices.append(self.offsets[source_index] + local_index)
+        return indices

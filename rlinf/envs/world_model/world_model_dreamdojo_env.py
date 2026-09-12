@@ -12,49 +12,43 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""DreamDojo world-model environment (scaffold).
+"""DreamDojo world-model environment.
 
 This module wires the NVIDIA DreamDojo generalist robot world model
 (https://github.com/NVIDIA/DreamDojo, based on Cosmos-Predict2.5) into RLinf
 as a `world-model env`, mirroring the design of :class:`WanEnv`
 (see ``rlinf/envs/world_model/world_model_wan_env.py``).
 
-Task setting this scaffold is written for:
+Task setting:
     - Unitree G1 + Dex3 hand, bimanual (action_dim = 28, state_dim = 28)
     - Single head camera (``head_view``, no wrist views)
-    - GR00T N1.7 as the policy (chunk length = 16 timesteps)
+    - GR00T N1.7 as the policy (chunk length = 12 timesteps)
     - LeRobot v2.1 init dataset (parquet + mp4) via
       :class:`LeRobotV21InitDataset` — no offline ``.npy`` conversion needed
-    - 4-class progress reward model producing a scalar reward in ``[0, 1]``
-      (already reduced inside the reward model itself)
-
-Everything DreamDojo-specific is behind ``TODO(dreamdojo)`` markers; fill them
-in once you drop the DreamDojo package under ``$VENV_DIR/dreamdojo`` (or wire
-its imports below).
+    - v2 three-head milestone classifier with independent per-env ratchets
 """
 
 from __future__ import annotations
 
+import os
+import sys
+from pathlib import Path
 from typing import Optional
 
-import numpy as np
 import torch
 import torch.nn.functional as F
 import torchvision.transforms as transforms
-from PIL import Image  # noqa: F401  (kept for parity with WanEnv; delete if unused)
 
-from rlinf.data.datasets.lerobot_world_model import LeRobotV21InitDataset
+from rlinf.data.datasets.lerobot_world_model import (
+    LeRobotV21InitDataset,
+    MixedLeRobotV21InitDataset,
+)
 from rlinf.envs.world_model.base_world_env import BaseWorldEnv
-
-# TODO(dreamdojo): replace these placeholder imports once the DreamDojo package
-# is installed in the venv (or vendored under rlinf/models/embodiment/dreamdojo/).
-# Example (subject to change based on the real DreamDojo API):
-#
-#     from dreamdojo.pipelines import DreamDojoVideoPipeline, ModelConfig
-#     from dreamdojo.models.reward_model import ProgressResnetRewModel
-DreamDojoVideoPipeline = None  # type: ignore[assignment]
-ProgressResnetRewModel = None  # type: ignore[assignment]
-
+from rlinf.envs.world_model.dreamdojo_adapters import (
+    G1DreamDojoActionBridge,
+    update_g1_dex3_state,
+)
+from rlinf.envs.world_model.dreamdojo_reward import BatchedMilestoneReward
 
 __all__ = ["DreamDojoEnv"]
 
@@ -82,6 +76,17 @@ class DreamDojoEnv(BaseWorldEnv):
         record_metrics: bool = True,
         worker_info=None,
     ):
+        # BaseWorldEnv builds the reset dataset, so dimensions must exist first.
+        self.action_dim = int(cfg.get("action_dim", 28))
+        self.state_dim = int(cfg.get("state_dim", 28))
+        self.chunk = int(cfg.chunk)
+        # RLinf counts 30-Hz commands; DreamDojo produces 15-Hz frames.
+        self.wm_chunk = 12
+        self.wm_steps_per_chunk = self.chunk // 2
+        self.condition_frame_length = int(cfg.get("condition_frame_length", 1))
+        self.image_size = tuple(cfg.get("image_size", (480, 640)))
+        self.enable_kir = bool(cfg.get("enable_kir", False))
+        self.seed_offset = int(seed_offset)
         super().__init__(
             cfg,
             num_envs,
@@ -95,6 +100,7 @@ class DreamDojoEnv(BaseWorldEnv):
         self.use_fixed_reset_state_ids = cfg.use_fixed_reset_state_ids
         self.group_size = cfg.group_size
         self.num_group = self.num_envs // self.group_size
+        self._init_eval_mask()
 
         self._generator = torch.Generator()
         self._generator.manual_seed(self.seed)
@@ -103,34 +109,23 @@ class DreamDojoEnv(BaseWorldEnv):
         # ---- WM hyperparameters (defaults chosen to mirror WanEnv semantics) ----
         # These names are intentionally identical to WanEnv so YAML overrides
         # transfer 1:1 between the two envs.
-        self.num_inference_steps: int = cfg.num_inference_steps
-        self.chunk: int = cfg.chunk  # action-chunk length, e.g. 8
-        self.condition_frame_length: int = cfg.condition_frame_length  # e.g. 5
-        self.num_frames: int = cfg.num_frames  # condition + chunk
-        assert self.num_frames == self.condition_frame_length + self.chunk, (
-            "num_frames must equal condition_frame_length + chunk"
+        self.num_inference_steps = int(cfg.num_inference_steps)
+        self.num_frames = int(cfg.num_frames)
+        assert self.num_frames == self.condition_frame_length + self.wm_chunk, (
+            "num_frames must equal condition_frame_length + wm_chunk"
         )
 
-        self.image_size = tuple(cfg.image_size)  # e.g. (256, 256)
-
-        self.retain_action: bool = cfg.get("retain_action", True)
-        self.enable_kir: bool = cfg.get("enable_kir", True)
-
-        # G1 + Dex3 has 28-D actions and 28-D state. Keep both configurable so
-        # the same env can serve other robots without code edits.
-        self.action_dim: int = cfg.get("action_dim", 28)
-        self.state_dim: int = cfg.get("state_dim", 28)
-
-        # Optional scalar reward threshold for marking a chunk successful.
-        # For a 4-class progress reward mapped to [0, 1] (phase index / 3),
-        # phase-3 corresponds to reward ~= 1.0 -> a threshold around 0.9 works.
-        self.success_reward_threshold: float = cfg.get(
-            "success_reward_threshold", 0.9
-        )
+        if self.chunk != 12 or self.action_dim != 28:
+            raise ValueError("DreamDojo G1 currently requires chunk=12, action_dim=28")
+        if self.condition_frame_length != 1 or self.enable_kir or self.auto_reset:
+            raise ValueError(
+                "DreamDojo requires one condition frame, KIR off, auto_reset off"
+            )
 
         # ---- Build heavy components ----
         self.pipe = self._build_pipeline()
-        self.reward_model = self._load_reward_model().eval().to(self.device)
+        self.reward_model = self._load_reward_model()
+        self.action_bridge = G1DreamDojoActionBridge(cfg.action_statistics, self.device)
 
         # ---- Runtime state ----
         # ``current_obs`` layout matches WanEnv: [num_envs, 3, 1, T, H, W] in [-1, 1]
@@ -146,9 +141,17 @@ class DreamDojoEnv(BaseWorldEnv):
 
         # Condition-action buffer for AR generation: last ``T_c`` executed
         # actions per env. Dtype follows the actor's precision at runtime.
-        self.condition_action = torch.zeros(
-            self.num_envs, self.condition_frame_length, self.action_dim
+        self.previous_action = torch.zeros(
+            self.num_envs, self.action_dim, device=self.device
         )
+        self.current_state = torch.zeros(
+            self.num_envs, self.state_dim, device=self.device
+        )
+        self.previous_state = torch.zeros_like(self.current_state)
+        self.last_chunk_probs = torch.zeros(
+            self.num_envs, self.wm_steps_per_chunk, 3, device=self.device
+        )
+        self._render_frames = None
 
         # Trocar task does not have a "gripper open on reset" concept the way
         # LIBERO does; we keep the flag but default it to False.
@@ -184,72 +187,80 @@ class DreamDojoEnv(BaseWorldEnv):
         ``task``, ``episode_index``, ``dataset_meta``) so the reset path stays
         generic across world-model envs.
         """
-        return LeRobotV21InitDataset(
-            data_path=cfg.initial_image_path,
-            video_key=cfg.get("video_key", "head_view"),
-            state_dim=self.state_dim,
-            action_dim=self.action_dim,
-            enable_kir=self.enable_kir,
-            kir_context_len=self.condition_frame_length - 1,
-            image_size=self.image_size,
-            episodes=cfg.get("episodes"),
-            random_start_frame=cfg.get("random_start_frame", False),
-            video_backend=cfg.get("video_backend", "decord"),
+        dataset_kwargs = {
+            "video_key": cfg.get("video_key", "head_view"),
+            "state_dim": self.state_dim,
+            "action_dim": self.action_dim,
+            "enable_kir": self.enable_kir,
+            "kir_context_len": self.condition_frame_length - 1,
+            "image_size": self.image_size,
+            "episodes": cfg.get("episodes"),
+            "random_start_frame": cfg.get("random_start_frame", False),
+            "video_backend": cfg.get("video_backend", "decord"),
+            "history_frame_offset": 2,
+        }
+        paths = cfg.initial_image_path
+        if isinstance(paths, str):
+            return LeRobotV21InitDataset(paths, **dataset_kwargs)
+        return MixedLeRobotV21InitDataset(
+            list(paths),
+            mixing_weights=cfg.get("initial_image_mixing_weights"),
+            **dataset_kwargs,
         )
 
     def _build_pipeline(self):
-        """Instantiate the DreamDojo video-generation pipeline.
-
-        Contract this method must satisfy:
-
-        * The returned object exposes a callable (either ``pipe(**kwargs)`` or
-          ``pipe.generate(**kwargs)``) that, given ``condition_frames`` (List[PIL]
-          or float tensor in [-1, 1]) and ``action`` (float tensor of shape
-          ``[B, T, action_dim]``), returns ``num_frames`` predicted future
-          frames per env in a form we can convert to
-          ``[3, T_out, H, W]`` float tensors in [-1, 1].
-        * All heavy sub-modules (DiT / UNet, VAE, text encoder, action
-          tokenizer, ...) live on ``self.device`` after this returns.
-        """
-        # TODO(dreamdojo): replace with the real DreamDojo pipeline builder.
-        # Example scaffold (rename to whatever DreamDojo exports):
-        #
-        #     pipe = DreamDojoVideoPipeline.from_pretrained(
-        #         torch_dtype=torch.bfloat16,
-        #         device=self._get_runtime_device_str(),
-        #         model_configs=[
-        #             ModelConfig(path=self.cfg.model_path,   offload_device="cpu"),
-        #             ModelConfig(path=self.cfg.VAE_path,     offload_device="cpu"),
-        #             # DreamDojo may also want the text encoder / action tokenizer
-        #             # ModelConfig(path=self.cfg.text_encoder_path, offload_device="cpu"),
-        #         ],
-        #     )
-        #     pipe.dit.to(self.device)
-        #     pipe.vae.to(self.device)
-        #     return pipe
-        raise NotImplementedError(
-            "TODO(dreamdojo): wire NVIDIA/DreamDojo pipeline construction here."
+        """Instantiate batched Video2WorldInference with explicit offload flags."""
+        root = Path(self.cfg.dreamdojo_root).expanduser().resolve()
+        checkpoint = Path(self.cfg.model_path).expanduser().resolve()
+        if not checkpoint.is_file():
+            raise FileNotFoundError(f"DreamDojo checkpoint not found: {checkpoint}")
+        if str(root) not in sys.path:
+            sys.path.insert(0, str(root))
+        from cosmos_predict2._src.predict2.inference.video2world import (
+            Video2WorldInference,
         )
 
+        config_file = (
+            "cosmos_predict2/_src/predict2/action/configs/action_conditioned/config.py"
+        )
+        previous_cwd = Path.cwd()
+        offload = bool(self.cfg.get("enable_offload", True))
+
+        def offload_flag(name):
+            override = self.cfg.get(name)
+            return offload if override is None else bool(override)
+
+        try:
+            os.chdir(root)
+            return Video2WorldInference(
+                experiment_name=self.cfg.experiment_name,
+                ckpt_path=str(checkpoint),
+                s3_credential_path="",
+                context_parallel_size=1,
+                config_file=str(config_file),
+                offload_diffusion_model=offload_flag("wm_offload_diffusion_model"),
+                offload_text_encoder=offload_flag("wm_offload_text_encoder"),
+                offload_tokenizer=offload_flag("wm_offload_tokenizer"),
+                cache_text_embeddings=bool(
+                    self.cfg.get("cache_text_embeddings", False)
+                ),
+                skip_zero_guidance=bool(self.cfg.get("skip_zero_guidance", False)),
+            )
+        finally:
+            os.chdir(previous_cwd)
+
     def _load_reward_model(self):
-        """Load the 4-class progress reward model.
-
-        The model must expose ``predict_rew(images) -> Tensor`` returning a
-        scalar reward per frame in ``[0, 1]`` (typically ``phase_index / 3``).
-        For a raw 4-class classifier, do the reduction inside the model's
-        ``predict_rew`` so the env can stay generic.
-
-        Input shape: ``[B*chunk, 3, H, W]``  float in [-1, 1] or [0, 1]
-                     (match what your reward model was trained on).
-        Output:      ``[B*chunk]``           float in [0, 1]
-        """
+        """Load the v2 cumulative-head milestone reward and ratchet."""
         rew_type = self.cfg.reward_model.type
-        # TODO(dreamdojo): register your reward model class(es) here.
-        # if rew_type == "ProgressResnetRewModel":
-        #     return ProgressResnetRewModel(self.cfg.reward_model.from_pretrained)
-        raise NotImplementedError(
-            f"TODO(dreamdojo): load reward model type={rew_type!r} "
-            f"from {self.cfg.reward_model.from_pretrained!r}."
+        if rew_type != "MilestoneRewardV2":
+            raise ValueError(f"Unsupported DreamDojo reward model: {rew_type}")
+        return BatchedMilestoneReward(
+            self.cfg.reward_model.from_pretrained,
+            self.num_envs,
+            self.device,
+            duplicate_for_30fps=bool(
+                self.cfg.reward_model.get("duplicate_for_30fps", True)
+            ),
         )
 
     # ------------------------------------------------------------------ #
@@ -300,18 +311,24 @@ class DreamDojoEnv(BaseWorldEnv):
                 device=self.device,
             ),
         }
-        episode_info["reward"] = episode_info["return"] / episode_info["episode_len"].clamp_min(1)
+        episode_info["reward"] = episode_info["return"] / episode_info[
+            "episode_len"
+        ].clamp_min(1)
+        episode_info["episode_seconds"] = episode_info["episode_len"] / 30.0
+        for head, name in enumerate(("picked", "handed", "placed")):
+            episode_info[name] = (self.reward_model.stage > head).clone()
+            episode_info[f"{name}_prob_max"] = (
+                self.last_chunk_probs[:, :, head].amax(dim=1).clone()
+            )
         infos["episode"] = episode_info
         return infos
 
     def _calc_step_reward(self, chunk_rewards: torch.Tensor) -> torch.Tensor:
         """Convert per-frame chunk rewards to per-chunk scalar step rewards.
 
-        Mirrors WanEnv: takes the max reward inside the chunk as the step
-        signal so a single high-progress frame propagates back to the actor.
-        Adjust if you want mean, last-frame, or delta-based rewards instead.
+        Sum the one-time milestone payouts over the executed interval.
         """
-        return chunk_rewards.max(dim=1).values
+        return chunk_rewards.sum(dim=1)
 
     # ------------------------------------------------------------------ #
     #                       Reset / rollout / step                        #
@@ -329,7 +346,9 @@ class DreamDojoEnv(BaseWorldEnv):
             episode_indices = self._sample_reset_episode_indices()
 
         img_tensors: list[torch.Tensor] = []
-        condition_actions: list[torch.Tensor] = []
+        initial_states: list[torch.Tensor] = []
+        initial_actions: list[torch.Tensor] = []
+        baseline_states: list[torch.Tensor] = []
         task_descriptions: list[str] = []
         init_ee_poses: list = []
 
@@ -351,9 +370,18 @@ class DreamDojoEnv(BaseWorldEnv):
             img_tensor = first_frame["image"]  # [3, H, W] float in [0, 1]
 
             if "observation.state" in first_frame:
-                init_ee_poses.append(first_frame["observation.state"].numpy())
+                state = torch.as_tensor(first_frame["observation.state"]).float()
+                init_ee_poses.append(state.numpy())
             else:
+                state = torch.zeros(self.state_dim)
                 init_ee_poses.append(None)
+            initial_states.append(state)
+            initial_actions.append(
+                torch.as_tensor(first_frame["wm_previous_action"]).float()
+            )
+            baseline_states.append(
+                torch.as_tensor(first_frame["wm_previous_state"]).float()
+            )
 
             if img_tensor.shape[1:] != self.image_size:
                 img_tensor = F.interpolate(
@@ -369,43 +397,14 @@ class DreamDojoEnv(BaseWorldEnv):
                 1, self.condition_frame_length, 1, 1
             )  # [3, T_c, H, W]
 
-            env_condition_action = np.zeros(
-                (self.condition_frame_length, self.action_dim), dtype=np.float32
-            )
-
-            # KIR: fill last (T_c - 1) condition frames with real pre-keyframe
-            # context and their executed actions, if available.
-            target_items = episode_data.get("target_items", [])
-            if len(target_items) == self.condition_frame_length - 1:
-                for target_idx, target_frame in enumerate(target_items):
-                    if "image" not in target_frame or "action" not in target_frame:
-                        raise ValueError(
-                            "Missing image/action in KIR target frame for "
-                            f"episode {episode_idx}"
-                        )
-                    target_img = target_frame["image"]
-                    if target_img.shape[1:] != self.image_size:
-                        target_img = F.interpolate(
-                            target_img.unsqueeze(0),
-                            size=self.image_size,
-                            mode="bilinear",
-                            align_corners=False,
-                        ).squeeze(0)
-                    target_img = self.trans_norm(target_img)
-                    env_img_tensor[:, target_idx + 1] = target_img
-                    env_condition_action[target_idx + 1] = (
-                        target_frame["action"].numpy()
-                        if isinstance(target_frame["action"], torch.Tensor)
-                        else target_frame["action"]
-                    )
-
             img_tensors.append(env_img_tensor)
-            condition_actions.append(torch.from_numpy(env_condition_action))
 
         stacked_imgs = torch.stack(img_tensors, dim=0).to(self.device)
         # [num_envs, 3, 1, T_c, H, W] to leave room for the "view" axis Wan uses.
         self.current_obs = stacked_imgs.unsqueeze(2).to(self.device)
-        self.condition_action = torch.stack(condition_actions, dim=0).to(self.device)
+        self.current_state = torch.stack(initial_states).to(self.device)
+        self.previous_action = torch.stack(initial_actions).to(self.device)
+        self.previous_state = torch.stack(baseline_states).to(self.device)
 
         for env_idx in range(self.num_envs):
             self.image_queue[env_idx] = [
@@ -415,6 +414,8 @@ class DreamDojoEnv(BaseWorldEnv):
 
         self.task_descriptions = task_descriptions
         self.init_ee_poses = init_ee_poses
+        self.reward_model.reset()
+        self._render_frames = None
 
         self._reset_metrics()
         return self._wrap_obs(), {}
@@ -448,26 +449,31 @@ class DreamDojoEnv(BaseWorldEnv):
         )
         chunk_truncations = torch.zeros_like(chunk_terminations)
 
-        # Mark termination on the last frame of the chunk when the progress
-        # reward crosses the success threshold.
-        success_mask = step_reward >= self.success_reward_threshold
-        chunk_terminations[:, -1] = success_mask
+        # Success means all three ordered milestones have been confirmed.
+        success_mask = self.reward_model.stage == 3
+        if not self.ignore_terminations:
+            chunk_terminations[:, -1] = success_mask
 
         self.elapsed_steps += self.chunk
+        if self.elapsed_steps >= self.cfg.max_episode_steps:
+            chunk_truncations[:, -1] = True
+        if self.eval_unique_episodes:
+            # Native EnvWorker counts only newly-done slots. Padding still
+            # participates in batched inference but never emits an episode.
+            chunk_terminations &= self._eval_valid_mask[:, None]
+            chunk_truncations &= self._eval_valid_mask[:, None]
         infos: dict = {}
-        infos = self._record_metrics(step_reward, chunk_terminations[:, -1], infos)
+        infos = self._record_metrics(step_reward, success_mask, infos)
 
         extracted_obs = self._wrap_obs()
 
-        if self.auto_reset and success_mask.any():
-            # Reset only the envs that just terminated so the runner sees fresh
-            # episodes at the next chunk boundary. WanEnv does the equivalent
-            # via ``_handle_auto_reset``; keep the same semantics.
-            extracted_obs, infos = self._handle_auto_reset(
-                success_mask, extracted_obs, infos
-            )
-
-        return [extracted_obs], chunk_rewards, chunk_terminations, chunk_truncations, [infos]
+        return (
+            [extracted_obs],
+            chunk_rewards,
+            chunk_terminations,
+            chunk_truncations,
+            [infos],
+        )
 
     # ------------------------------------------------------------------ #
     #                    DreamDojo-specific hot loops                     #
@@ -479,78 +485,84 @@ class DreamDojoEnv(BaseWorldEnv):
         Contract:
             * ``actions`` shape ``[num_envs, chunk, action_dim]`` (float32 or bf16).
             * On exit, ``self.current_obs`` is
-              ``[num_envs, 3, 1, condition_frame_length + chunk, H, W]``
+              ``[num_envs, 3, 1, condition_frame_length + wm_steps_per_chunk, H, W]``
               (older frames evicted via a sliding window) and each
               ``self.image_queue[i]`` holds the last ``condition_frame_length``
               frames as ``[3, 1, H, W]`` tensors in [-1, 1].
         """
-        actions_tensor = (
-            torch.from_numpy(actions) if isinstance(actions, np.ndarray) else actions
-        ).to(device=self.device)
-
-        self.condition_action = self.condition_action.to(
-            device=actions_tensor.device, dtype=actions_tensor.dtype
+        actions_tensor = torch.as_tensor(
+            actions, device=self.device, dtype=torch.float32
         )
-        if self.retain_action:
-            actions_tensor = torch.cat(
-                [self.condition_action, actions_tensor], dim=1
+        if actions_tensor.shape != (self.num_envs, self.chunk, self.action_dim):
+            raise ValueError(
+                "Expected actions shaped "
+                f"{(self.num_envs, self.chunk, self.action_dim)}, "
+                f"got {tuple(actions_tensor.shape)}"
             )
-
-        # Slide condition-action buffer: keep the most recent (T_c - 1) actions.
-        self.condition_action[:, 1 : self.condition_frame_length, :] = actions_tensor[
-            :, -(self.condition_frame_length - 1) :, :
-        ]
-
-        # TODO(dreamdojo): call the real DreamDojo generation API. A rough
-        # template mirroring ``WanEnv._infer_next_chunk_frames``:
-        #
-        #     kwargs = {
-        #         "condition_frames": [
-        #             self._decode_env_condition_frames(env_idx)  # e.g. List[PIL]
-        #             for env_idx in range(self.num_envs)
-        #         ],
-        #         "action": actions_tensor,                       # [B, T, action_dim]
-        #         "prompt": self.task_descriptions,               # List[str]
-        #         "height": self.image_size[0],
-        #         "width":  self.image_size[1],
-        #         "num_frames": self.num_frames,
-        #         "num_inference_steps": self.num_inference_steps,
-        #         "cfg_scale": 1.0,
-        #     }
-        #     output = self.pipe(**kwargs)                        # e.g. List[List[PIL]]
-        #
-        # Then convert each per-env output to a [3, T_out, H, W] tensor in
-        # [-1, 1], update ``self.image_queue[env_idx]`` with the last 4 frames,
-        # and concatenate the new chunk onto ``self.current_obs`` along dim=3.
-        raise NotImplementedError(
-            "TODO(dreamdojo): implement DreamDojo AR generation call here."
+        encoded = self.action_bridge.encode_policy_chunk(
+            self.previous_action, actions_tensor, self.previous_state
         )
+
+        condition = self.current_obs[:, :, 0, -1]
+        condition_uint8 = ((condition + 1) * 127.5).clamp(0, 255).to(torch.uint8)
+        input_video = torch.cat(
+            [
+                condition_uint8.unsqueeze(2),
+                torch.zeros_like(condition_uint8)
+                .unsqueeze(2)
+                .repeat(1, 1, self.wm_chunk, 1, 1),
+            ],
+            dim=2,
+        )
+        generated = self.pipe.generate_vid2world(
+            prompt=[""] * self.num_envs,
+            input_path=input_video,
+            action=encoded,
+            guidance=0,
+            num_video_frames=self.wm_chunk + 1,
+            num_latent_conditional_frames=1,
+            resolution=f"{self.image_size[0]},{self.image_size[1]}",
+            seed=self.seed + self.elapsed_steps,
+            lam_video=None,
+            num_steps=self.num_inference_steps,
+        )
+        # Ignore the padded unexecuted future: 12 policy commands = 6 frames.
+        new_frames = generated[:, :, 1 : 1 + self.wm_steps_per_chunk].to(self.device)
+        condition = self.current_obs[:, :, :, -1:]
+        self.current_obs = torch.cat([condition, new_frames.unsqueeze(2)], dim=3)
+        if self.video_cfg.save_video:
+            self._render_frames = (
+                ((new_frames + 1) * 127.5)
+                .clamp(0, 255)
+                .to(torch.uint8)
+                .permute(0, 2, 3, 4, 1)
+                .cpu()
+            )
+        # For next image I[t+12], baseline is a[t+10], s[t+10].
+        # Proprio remains an explicit perfect-target-following proxy.
+        self.previous_action = actions_tensor[:, -2].detach()
+        self.previous_state = actions_tensor[:, -3].detach().clone()
+        self.current_state = update_g1_dex3_state(
+            self.current_state, actions_tensor[:, -1]
+        )
+        for env_index in range(self.num_envs):
+            self.image_queue[env_index] = [self.current_obs[env_index, :, 0, -1:]]
 
     def _infer_next_chunk_rewards(self) -> torch.Tensor:
-        """Score the newest ``chunk`` frames with the progress reward model.
+        """Score the newest WM frames and align payouts to control commands.
 
         Returns:
-            ``[num_envs, chunk]`` float tensor in ``[0, 1]``.
+            ``[num_envs, chunk]`` rewards, nonzero only on image boundaries.
+            Multiple confirmed milestones can pay out at one boundary.
         """
-        if self.reward_model is None:
-            raise ValueError("Reward model is not loaded")
-
-        # current_obs: [num_envs, 3, 1, T_c + chunk, H, W]  in [-1, 1]
-        b, c, v, t, h, w = self.current_obs.shape
-        # Reorder to [num_envs, T_c+chunk, 3, 1, H, W] and take the last ``chunk`` frames.
-        chunk_obs = self.current_obs.permute(0, 3, 1, 2, 4, 5)[
-            :, -self.chunk :
-        ]
-        # [num_envs*chunk, 3, H, W]
-        chunk_obs = chunk_obs.reshape(b * self.chunk, c, v, h, w).squeeze(2)
-        chunk_obs = chunk_obs.to(self.device)
-
-        # ``predict_rew`` MUST return already-reduced scalars in [0, 1].
-        # For a 4-class progress classifier, reduce with
-        #     reward = (softmax(logits) * torch.arange(4, device=logits.device)).sum(-1) / 3.0
-        # inside your model's ``predict_rew``.
-        rewards = self.reward_model.predict_rew(chunk_obs)
-        return rewards.reshape(b, self.chunk)
+        frames = self.current_obs[:, :, 0, -self.wm_steps_per_chunk :].permute(
+            0, 2, 1, 3, 4
+        )
+        frame_rewards, self.last_chunk_probs = self.reward_model.score_chunk(frames)
+        # Images arrive after two control commands; pay at that boundary.
+        rewards = frame_rewards.new_zeros(self.num_envs, self.chunk)
+        rewards[:, 1::2] = frame_rewards
+        return rewards
 
     # ------------------------------------------------------------------ #
     #                       Observation wrapping                          #
@@ -562,11 +574,8 @@ class DreamDojoEnv(BaseWorldEnv):
         Keys and shapes are chosen to match :meth:`LiberoEnv._wrap_obs` so no
         actor-side branching is needed.
 
-        Since DreamDojo (in this setup) generates only the main camera and
-        does not expose proprioception, ``wrist_images`` is ``None`` and
-        ``states`` is a zero placeholder. Adjust ``state_dim`` via config if
-        your GR00T converter wants a specific shape (LIBERO converter reads 8
-        columns, dual-arm Dex3 might want more).
+        DreamDojo generates the main camera only. ``states`` is the last-known
+        proprio proxy assuming perfect tracking of decoded absolute targets.
         """
         # Last generated frame per env.
         last_frame = self.current_obs[:, :, 0, -1, :, :]  # [B, 3, H, W]
@@ -578,14 +587,8 @@ class DreamDojoEnv(BaseWorldEnv):
             )
         full_image = full_image.permute(0, 2, 3, 1).to(torch.uint8)  # [B, H, W, 3]
 
-        # G1 + Dex3 layout: [left_arm(0:7), right_arm(7:14), left_hand(14:21),
-        # right_hand(21:28)]. DreamDojo does not expose proprio, so we fill
-        # zeros here. If you later want to feed the last-known state (from
-        # reset or a state estimator), populate ``self.current_state`` in
-        # ``reset()`` / ``chunk_step()`` and swap this out.
-        states = torch.zeros(
-            (self.num_envs, self.state_dim), device=self.device, dtype=torch.float32
-        )
+        # G1 + Dex3 layout: left_arm, right_arm, left_hand, right_hand.
+        states = self.current_state.to(self.device, dtype=torch.float32)
 
         return {
             "main_images": full_image,
@@ -594,20 +597,40 @@ class DreamDojoEnv(BaseWorldEnv):
             "task_descriptions": list(self.task_descriptions),
         }
 
-    def _handle_auto_reset(self, done_mask: torch.Tensor, extracted_obs, infos):
-        """Reset only the envs that finished this chunk.
+    def capture_image(self) -> torch.Tensor:
+        """Return all newly generated frames for RLinf's video recorder."""
+        if self._render_frames is not None:
+            return self._render_frames
+        return self._wrap_obs()["main_images"][:, None]
 
-        WanEnv resets everything unconditionally; for GRPO groups you often
-        want per-env resets so surviving group members can keep rolling. Keep
-        this stub simple for the first version — full episode boundary logic
-        (final-obs vs. reset-obs) can be added when needed.
-        """
-        # TODO(dreamdojo): implement selective reset. As a placeholder, reset
-        # all envs whenever any one is done, matching the WanEnv default.
-        if done_mask.any():
-            extracted_obs, infos_reset = self.reset()
-            infos.update(infos_reset)
-        return extracted_obs, infos
+    def _init_eval_mask(self) -> None:
+        """Exclude compute-only padding slots from native eval episode counts."""
+        self.eval_unique_episodes = bool(self.cfg.get("eval_unique_episodes", False))
+        self._eval_valid_mask = torch.ones(
+            self.num_envs, dtype=torch.bool, device=self.device
+        )
+        if not self.eval_unique_episodes:
+            return
+        if (
+            not self.cfg.get("is_eval", False)
+            or not self.use_fixed_reset_state_ids
+            or self.group_size != 1
+            or not self.ignore_terminations
+        ):
+            raise ValueError(
+                "Unique eval requires is_eval, fixed resets, group_size=1, "
+                "and ignore_terminations=True"
+            )
+        count = len(self.dataset)
+        slots = self.num_envs * self.total_num_processes
+        if count <= 0 or slots < count or slots - count >= self.total_num_processes:
+            raise ValueError(
+                "Unique eval needs the smallest evenly sharded batch covering the dataset"
+            )
+        indices = self.seed_offset * self.num_envs + torch.arange(
+            self.num_envs, device=self.device
+        )
+        self._eval_valid_mask = indices < count
 
     def _sample_reset_episode_indices(self) -> list[int]:
         """Sample dataset indices for the next reset, grouping by GRPO group.
@@ -617,7 +640,12 @@ class DreamDojoEnv(BaseWorldEnv):
         """
         n_episodes = len(self.dataset)
         if self.use_fixed_reset_state_ids:
-            base = torch.arange(self.num_group) % n_episodes
+            start = self.seed_offset * self.num_group
+            base = (torch.arange(self.num_group) + start) % n_episodes
+        elif hasattr(self.dataset, "sample_indices"):
+            base = torch.tensor(
+                self.dataset.sample_indices(self.num_group, self._generator)
+            )
         else:
             base = torch.randint(
                 0, n_episodes, (self.num_group,), generator=self._generator
@@ -628,11 +656,28 @@ class DreamDojoEnv(BaseWorldEnv):
     #                              Offload                                #
     # ------------------------------------------------------------------ #
 
+    def _move_resident_wm(self, device):
+        """Move chunk-resident modules only at the outer rollout boundary."""
+        if not self.pipe.offload_diffusion_model:
+            self.pipe.model.net.to(device)
+            self.pipe.model.conditioner.to(device)
+        if not self.pipe.offload_tokenizer:
+            tokenizer = self.pipe.model.tokenizer
+            if hasattr(tokenizer, "encoder") and hasattr(tokenizer, "decoder"):
+                tokenizer.encoder.to(device)
+                tokenizer.decoder.to(device)
+            else:
+                # Wan2pt1VAEInterface has one shared nn.Module under model.model,
+                # not the separate encoder/decoder interface used by Cosmos.
+                tokenizer.clear_cache()
+                tokenizer.model.model.to(device)
+
     def offload(self):
         if self._is_offloaded:
             return
-        # TODO(dreamdojo): move heavy DreamDojo modules to CPU (e.g.
-        # ``self.pipe.dit.to("cpu")``, ``self.pipe.vae.to("cpu")``).
+        # Per-chunk offloaded modules are already on CPU. Resident modules
+        # must also release memory before the actor training phase.
+        self._move_resident_wm("cpu")
         self.reward_model.to("cpu")
         if self.current_obs is not None:
             self.current_obs = self.current_obs.to("cpu")
@@ -642,7 +687,7 @@ class DreamDojoEnv(BaseWorldEnv):
     def onload(self):
         if not self._is_offloaded:
             return
-        # TODO(dreamdojo): move DreamDojo modules back to ``self.device``.
+        self._move_resident_wm(self.device)
         self.reward_model.to(self.device)
         if self.current_obs is not None:
             self.current_obs = self.current_obs.to(self.device)

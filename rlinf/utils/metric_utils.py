@@ -419,6 +419,24 @@ def compute_evaluate_metrics(eval_metrics_list):
     return aggregated_eval_metrics
 
 
+def compute_group_reward_metrics(grouped_scores: torch.Tensor) -> dict:
+    """Report GRPO group diversity without changing rewards or advantages."""
+    if grouped_scores.ndim != 2 or grouped_scores.numel() == 0:
+        raise ValueError("Expected nonempty [num_groups, group_size] scores")
+    scores = grouped_scores.detach().float()
+    if not torch.isfinite(scores).all():
+        raise ValueError("Non-finite GRPO group scores")
+    spread = scores.amax(dim=-1) - scores.amin(dim=-1)
+    return {
+        "group_return_std_mean": scores.std(dim=-1, unbiased=False).mean().item(),
+        "group_flat_fraction": (spread <= 1e-6).float().mean().item(),
+        "group_zero_fraction": (scores.abs().amax(dim=-1) <= 1e-6)
+        .float()
+        .mean()
+        .item(),
+    }
+
+
 def compute_rollout_metrics(data_buffer: dict) -> dict:
     rollout_metrics = {}
     loss_mask = data_buffer.get("loss_mask", None)

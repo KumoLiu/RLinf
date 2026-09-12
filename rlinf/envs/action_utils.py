@@ -351,6 +351,10 @@ def prepare_actions(
             )
         else:
             raise NotImplementedError(f"Env type {wm_env_type} not implemented")
+    elif env_type == SupportedEnvType.DREAMDOJOWM:
+        if wm_env_type != "trocar":
+            raise NotImplementedError(f"Env type {wm_env_type} not implemented")
+        chunk_actions = raw_chunk_actions
     elif (
         env_type == SupportedEnvType.MANISKILL
         or env_type == SupportedEnvType.MANISKILL_RLT

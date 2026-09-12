@@ -99,36 +99,32 @@ def convert_to_g1_dex3_action_n1d7(
 
     Expected keys (from the ``g1_dex3_head_config`` action ``modality_keys``)::
 
-        action.left_arm   : [B, T, 7]   (RELATIVE / delta joint targets)
-        action.right_arm  : [B, T, 7]   (RELATIVE)
+        action.left_arm   : [B, T, 7]   (decoded absolute joint targets)
+        action.right_arm  : [B, T, 7]   (decoded absolute joint targets)
         action.left_hand  : [B, T, 7]   (ABSOLUTE joint positions)
         action.right_hand : [B, T, 7]   (ABSOLUTE)
 
-    The arm/hand representation split (relative arms + absolute hands) must be
-    preserved by whatever consumes the returned array (world-model env, real
-    robot bridge). :func:`rlinf.envs.action_utils.prepare_actions` should
-    branch on ``env_type == DREAMDOJOWM`` and pass this array through
-    unchanged.
+    GR00T's processor trains arm actions in relative form, then
+    ``unapply_action`` resolves every relative action against the current state
+    before this converter runs. The world-model env therefore receives raw
+    absolute targets for all four groups.
     """
+    prefix = "action." if "action.left_arm" in action_chunk else ""
     try:
-        left_arm = action_chunk["action.left_arm"][:, :chunk_size]
-        right_arm = action_chunk["action.right_arm"][:, :chunk_size]
-        left_hand = action_chunk["action.left_hand"][:, :chunk_size]
-        right_hand = action_chunk["action.right_hand"][:, :chunk_size]
+        left_arm = action_chunk[f"{prefix}left_arm"][:, :chunk_size]
+        right_arm = action_chunk[f"{prefix}right_arm"][:, :chunk_size]
+        left_hand = action_chunk[f"{prefix}left_hand"][:, :chunk_size]
+        right_hand = action_chunk[f"{prefix}right_hand"][:, :chunk_size]
     except KeyError as e:
         raise KeyError(
-            "convert_to_g1_dex3_action_n1d7 requires action_chunk to contain "
-            "action.left_arm / action.right_arm / action.left_hand / "
-            f"action.right_hand; got keys {list(action_chunk.keys())}"
+            "convert_to_g1_dex3_action_n1d7 requires left_arm / right_arm / "
+            "left_hand / right_hand, optionally prefixed with 'action.'; "
+            f"got keys {list(action_chunk.keys())}"
         ) from e
 
-    action_array = np.concatenate(
-        [left_arm, right_arm, left_hand, right_hand], axis=-1
-    )
+    action_array = np.concatenate([left_arm, right_arm, left_hand, right_hand], axis=-1)
     if action_array.shape[-1] != 28:
-        raise ValueError(
-            f"Expected 28-D g1_dex3 action, got {action_array.shape[-1]}"
-        )
+        raise ValueError(f"Expected 28-D g1_dex3 action, got {action_array.shape[-1]}")
     return action_array
 
 
@@ -303,6 +299,7 @@ OBS_CONVERSION = {
     "maniskill": convert_maniskill_obs_to_gr00t_format,
     "libero": convert_libero_obs_to_gr00t_format,
     "isaaclab_stack_cube": convert_libero_obs_to_gr00t_format,
+    "g1_dex3_wm": convert_g1_dex3_wm_obs_to_gr00t_format,
 }
 
 ACTION_CONVERSION_N1D5 = {
@@ -321,6 +318,7 @@ ACTION_CONVERSION_N1D7 = {
     "libero": convert_to_libero_action_n1d7,
     "maniskill": convert_to_maniskill_action,
     "isaaclab_stack_cube": convert_to_isaaclab_stack_cube_action,
+    "g1_dex3_wm": convert_to_g1_dex3_action_n1d7,
 }
 
 
