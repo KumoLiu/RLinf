@@ -3,10 +3,12 @@
 
 """CPU regressions for native inference optimizations, without GPU model loads."""
 
+import argparse
 import ast
 import importlib.util
 import json
 import os
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -44,6 +46,98 @@ def native_method(path, class_name, name):
     return next(
         n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == name
     )
+
+
+def test_interactive_data_keeps_complete_upstream_registry():
+    path = ROOT / "cosmos_predict2/_src/predict2/interactive/configs/data.py"
+    if not path.is_file():
+        pytest.skip(f"External DreamDojo source not installed: {path}")
+    tree = ast.parse(path.read_text())
+    tree.body = [
+        node for node in tree.body if not isinstance(node, (ast.Import, ast.ImportFrom))
+    ]
+    registrations = []
+    config_store = SimpleNamespace(store=lambda **kwargs: registrations.append(kwargs))
+    namespace = {
+        "ConfigStore": SimpleNamespace(instance=lambda: config_store),
+        "L": lambda target: lambda **kwargs: kwargs,
+        "ActionDatasetSFWarmup": object,
+        "MultiVideoActionDataset": object,
+        "DistributedSampler": object,
+        "DataLoader": object,
+        "get_data_path": lambda embodiment: ([embodiment], [1.0]),
+    }
+    exec(compile(tree, str(path), "exec"), namespace)
+    namespace["register_interactive_data"]()
+    embodiments = {"gr1", "g1", "agibot", "agibot_fruit", "yam", "pretrain"}
+    expected = {
+        f"gr00t_{name}_warmup"
+        for name in embodiments | {"old_gr1_dreamdojo", "old_gr1_cosmos"}
+    } | {
+        f"gr00t_customized_{name}{suffix}"
+        for name in embodiments
+        for suffix in ("", "_long")
+    }
+    assert len(registrations) == 2 * len(expected)
+    for split in ("train", "val"):
+        entries = [r for r in registrations if r["group"] == f"data_{split}"]
+        assert {r["name"] for r in entries} == expected
+        assert all(r["package"] == f"dataloader_{split}" for r in entries)
+        assert all(r["node"]["dataset"] for r in entries)
+
+
+def test_teacher_generation_cli_keeps_standard_arguments(monkeypatch):
+    path = (
+        ROOT
+        / "cosmos_predict2/_src/predict2/action/inference/inference_gr00t_warmup.py"
+    )
+    if not path.is_file():
+        pytest.skip(f"External DreamDojo source not installed: {path}")
+    tree = ast.parse(path.read_text())
+    parser = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "parse_arguments"
+    )
+    namespace = {"argparse": argparse}
+    exec(
+        compile(ast.Module(body=[parser], type_ignores=[]), str(path), "exec"),
+        namespace,
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "teacher_generation",
+            "--experiment",
+            "g1",
+            "--dataset_path",
+            "/tmp/g1_dataset",
+            "--start",
+            "2",
+            "--end",
+            "4",
+        ],
+    )
+    args = namespace["parse_arguments"]()
+    assert args.dataset_path == "/tmp/g1_dataset"
+    assert (args.start, args.end) == (2, 4)
+    assert set(vars(args)) == {
+        "experiment",
+        "chunk_size",
+        "guidance",
+        "seed",
+        "ckpt_path",
+        "s3_cred",
+        "input_video_root",
+        "save_root",
+        "dataset_path",
+        "start",
+        "end",
+        "num_latent_conditional_frames",
+        "query_steps",
+        "context_parallel_size",
+    }
 
 
 @pytest.mark.parametrize("per_worker", [False, True])

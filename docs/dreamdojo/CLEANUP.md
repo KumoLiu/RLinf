@@ -97,3 +97,50 @@ DreamDojo原有checkpoint/dataset README及nightly docker文件的删除是既�
 原生配置dry-run退出0并输出完整可解析YAML，但MSC可选配置源因未设置profile记录了
 错误堆栈和provider警告；不影响本次本地配置解析，未在清理时改依赖来屏蔽它。
 本轮没有GPU重训/重评。
+
+## 5. 环境检查脚本合并（2026-09-16追加）
+
+经用户确认，将 `docker/dreamdojo/smoke.py` 和 `verify_runtime.py` 合并为
+`check_runtime.py`，独立保留imports/cuda/lam/nccl模式。删除原两份脚本，
+可从合并前commit `8171195f5cf284bc00f3ed6dee83ea34c89e3889` 恢复。
+没有移除LAM或通信检查，也没有改变训练/评测算法。
+
+- prepare_context/Dockerfile改为打包新脚本，build仅执行CPU imports模式。
+- run_cluster保留smoke/verify命令；只在这两个模式挂载新脚本以兼容旧SQSH。
+- 更新已有container测试，覆盖四模式分发、依赖漂移、无GPU/资产的检查入口、
+  构建文件复制及旧镜像只读挂载；不增加一套重复测试文件。
+- 验证：16项container针对性测试、完整161项DreamDojo CPU回归通过；
+  Ruff check/format、bash -n、git diff --check通过。
+- 隐藏GPU后实际执行imports模式，342个依赖版本及模块导入通过，
+  输出 `SMOKE_OK` / `cuda_tested=false`；没有实际执行CUDA/LAM/NCCL硬件检查。
+- 输出保存在原恢复目录的 `runtime-merge-tests.txt` 与 `runtime-merge-imports.txt`，
+  不在训练logs里新增记录。本次不重建/上传镜像，不改cluster快照、不提交GPU作业。
+
+## 6. 移除早期任务专用蒸馏实验（2026-09-16追加）
+
+经用户确认，删除本地DreamDojo内早期pick-trocar 97-frame及同系列49-frame
+self-forcing实验的8个专用脚本、1个实验配置、1个结果分析页面；
+移除共享配置内4组数据定义/注册、旧分层采样的manifest接口，
+以及TROCAR_PROJECT中的历史结果章节。逐文件清单见本轮恢复目录的manifest，
+不在活跃文档中继续保留旧实验结论。
+
+保留DreamDojo上游通用distill/interactive框架和说明、teacher generation入口，
+以及当前HF/LoRA世界模型、分类器、GRPO代码、数据和全部当前实验产物。
+旧蒸馏权重、视频、teacher生成数据在原本地路径已不存在，并非本次删除；
+未访问或清理cluster，也未删除仓库外历史备份。
+
+本轮恢复目录：
+
+```text
+/localhome/local-yunl/code_cleanup_archive/20260916_retire_distillation.A18ui9
+```
+
+删除前备份15个相关文件及两仓库git状态/diff，包含未提交的分析页面；
+`backup_manifest.json`记录SHA256与已不存在的原产物目录。
+恢复方式同第3节。本轮不提交commit，不覆盖其他已有修改。
+
+验证：163项DreamDojo CPU回归通过（包括新增的共享数据注册和CLI检查），
+Ruff check/format、两仓库git diff --check及当前最佳实验的sweep dry-run通过。
+源码/配置/项目文档无旧实验调用残留；旧RL日志manifest保存的历史git status
+仍会提到已删除页面的文件名，仅为当时快照，不是蒸馏结果或可执行引用，未篡改。
+测试输出和逐文件变更清单保存在本轮恢复目录，不新增训练日志或实验报告。

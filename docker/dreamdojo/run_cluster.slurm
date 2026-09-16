@@ -98,11 +98,12 @@ if [[ "${MODE}" != smoke ]]; then
     }
     MOUNTS+=",${ASSETS}/data:/assets/data:ro,${CHECKPOINTS}:${CHECKPOINTS}:ro,${HF_CACHE}/hub:/cache/huggingface/hub:ro"
 fi
-if [[ "${MODE}" == verify ]]; then
+if [[ "${MODE}" == smoke || "${MODE}" == verify ]]; then
     # Slurm runs a spool copy of this script, not its original checkout path.
-    VERIFY_SCRIPT="${DREAMDOJO_VERIFY_SCRIPT:-${SLURM_SUBMIT_DIR:-$PWD}/docker/dreamdojo/verify_runtime.py}"
-    [[ -f "${VERIFY_SCRIPT}" ]] || { echo "Missing verification script: ${VERIFY_SCRIPT}" >&2; exit 1; }
-    MOUNTS+=",${VERIFY_SCRIPT}:/opt/rlinf-build/verify_runtime.py:ro"
+    # Mount the unified checker so existing SQSH images need no rebuild.
+    CHECK_SCRIPT="${DREAMDOJO_CHECK_SCRIPT:-${SLURM_SUBMIT_DIR:-$PWD}/docker/dreamdojo/check_runtime.py}"
+    [[ -s "${CHECK_SCRIPT}" ]] || { echo "Missing or empty runtime check script: ${CHECK_SCRIPT}" >&2; exit 1; }
+    MOUNTS+=",${CHECK_SCRIPT}:/opt/rlinf-build/check_runtime.py:ro"
 fi
 
 export RLINF_RUN_MODE="${MODE}"
@@ -136,12 +137,12 @@ srun --container-image="${IMAGE}" --container-mounts="${MOUNTS}" \
         fi
         case "$RLINF_RUN_MODE" in
             smoke)
-                exec /opt/venv/bin/python /opt/rlinf-build/smoke.py --gpu
+                exec /opt/venv/bin/python /opt/rlinf-build/check_runtime.py cuda
                 ;;
             verify)
-                /opt/venv/bin/python /opt/rlinf-build/verify_runtime.py lam
+                /opt/venv/bin/python /opt/rlinf-build/check_runtime.py lam
                 exec /opt/venv/bin/torchrun --standalone --nnodes=1 --nproc-per-node=8 \
-                    /opt/rlinf-build/verify_runtime.py nccl
+                    /opt/rlinf-build/check_runtime.py nccl
                 ;;
             eval)
                 exec /opt/venv/bin/python evaluations/eval_embodied_agent.py \

@@ -170,7 +170,7 @@ def main():
         ("runtime-versions.json", versions),
     ]:
         (args.output / filename).write_text(json.dumps(payload, indent=2) + "\n")
-    for name in ("Dockerfile", "smoke.py"):
+    for name in ("Dockerfile", "check_runtime.py"):
         shutil.copy2(Path(__file__).parent / name, args.output / name)
     print(
         json.dumps(

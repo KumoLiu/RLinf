@@ -167,6 +167,34 @@ Dockerfile构建独立镜像，`export_sqsh.sh IMAGE /absolute/new/image.sqsh`
 新镜像先 `run_cluster.slurm smoke`，再 `verify` 检查严格LAM和8卡NCCL；
 通过后才开始小规模native eval/train。不要打包token、数据或checkpoint进镜像。
 
+环境检查统一在 `docker/dreamdojo/check_runtime.py`，不再维护单独的smoke/verify脚本：
+
+| 模式 | 检查内容 | 执行位置 |
+| --- | --- | --- |
+| `imports` | 固定依赖版本、CPU可导入模块、OpenCV版本 | Docker build的容器内，不用GPU/权重 |
+| `cuda` | 先做imports，再逐GPU测试FlashAttention/Transformer Engine前反向及WM深层导入 | Slurm计算节点容器内 |
+| `lam` | 严格加载真实LAM权重并运行编码器 | Slurm计算节点容器内，单GPU |
+| `nccl` | 8-rank collective与ring P2P通信 | Slurm计算节点容器内，torchrun启动 |
+
+Slurm命令保持不变（从配置好资产/环境变量的cluster RLinf根目录提交）：
+
+```bash
+sbatch docker/dreamdojo/run_cluster.slurm smoke
+sbatch docker/dreamdojo/run_cluster.slurm verify
+```
+
+`smoke` 调用 `check_runtime.py cuda`；`verify` 先运行lam，再用8进程运行nccl。
+两个检查模式都只读挂载当前checkout的check_runtime.py，兼容未包含新脚本的旧SQSH，
+不必重建镜像。需要先把更新后的launcher和check_runtime.py同步到cluster；本机改动不会自动上传。
+从其他目录提交时可用 `DREAMDOJO_CHECK_SCRIPT=/absolute/path/check_runtime.py`
+指定host侧脚本，替代旧的 `DREAMDOJO_VERIFY_SCRIPT`。
+训练/eval模式不额外挂载或运行此检查；不要覆盖旧续跑chain的已固定launcher快照。
+
+直接在镜像内使用：`python /opt/rlinf-build/check_runtime.py imports`（或cuda/lam）；
+nccl需 `torchrun --standalone --nnodes=1 --nproc-per-node=8 /opt/rlinf-build/check_runtime.py nccl`，
+并保持P2P开启、不设置NCCL_P2P_LEVEL。`--versions-file` 可指定imports/cuda使用的版本清单。
+这些是环境检查，不是policy成功率或WM生成质量评测。
+
 TensorBoard可在本机运行：
 
 ```bash

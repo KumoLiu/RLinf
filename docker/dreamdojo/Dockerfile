@@ -22,7 +22,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --python /opt/venv/bin/python --no-deps --reinstall \
       opencv-python-headless==4.12.0.88
 COPY src/ /opt/src/
-COPY source-manifest.json runtime-versions.json smoke.py /opt/rlinf-build/
+COPY source-manifest.json runtime-versions.json check_runtime.py /opt/rlinf-build/
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --python /opt/venv/bin/python --no-deps --no-sources \
       -e /opt/src/RLinf -e /opt/src/DreamDojo \
@@ -39,6 +39,6 @@ ENV PYTHONPATH=/opt/src/RLinf:/opt/src/DreamDojo \
     HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 PYTHONDONTWRITEBYTECODE=1 \
     PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 WORKDIR /opt/src/RLinf
-RUN python /opt/rlinf-build/smoke.py
+RUN python /opt/rlinf-build/check_runtime.py imports
 # No custom entrypoint: Pyxis/Slurm and Docker can invoke native RLinf commands.
 CMD ["/bin/bash"]
