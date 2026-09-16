@@ -192,6 +192,48 @@ class LeRobotV21InitDataset(Dataset):
         return len(self.episodes)
 
     def __getitem__(self, idx: int) -> dict[str, Any]:
+        return self.get_at_frame(idx)
+
+    def handover_start_frame(self, idx: int, max_offset: int = 30) -> int | None:
+        """Choose a causal pre-handover reset from valid success annotations.
+
+        No re-sampling on missing labels: callers keep the original episode,
+        preserving the configured source distribution. Frame units are raw 30 Hz.
+        """
+        if max_offset < 1:
+            raise ValueError("max_offset must be positive")
+        if self.fps != 30:
+            raise ValueError("Handover KIR requires raw 30-fps annotations")
+        meta = self._episode_meta.get(int(self.episodes[idx]), {})
+        phases = (meta.get("source_annotation") or {}).get("cleaned_phase_frames")
+        if meta.get("success") is not True or not isinstance(phases, dict):
+            return None
+        frames = [
+            phases.get(key)
+            for key in ("left_hand_pickup", "handover_to_right_hand", "placed_on_plate")
+        ]
+        length = int(meta.get("length", 0))
+        if not all(type(frame) is int and 0 <= frame < length for frame in frames):
+            return None
+        picked, handed, placed = frames
+        if not picked < handed < placed:
+            return None
+        start = handed - min(max_offset, (handed - picked) // 2)
+        # Stay outside the reward annotation's +/-5-frame ambiguous boundaries.
+        if start - picked <= 5 or handed - start <= 5:
+            return None
+        if start < max(self.history_frame_offset, 16):
+            return None
+        return start
+
+    def get_at_frame(
+        self,
+        idx: int,
+        start_frame: int | None = None,
+        *,
+        reward_history_frames: int = 0,
+    ) -> dict[str, Any]:
+        """Load an explicit aligned image/state/history without hidden RNG draws."""
         ep_idx = int(self.episodes[idx])
         ep_meta = self._episode_meta.get(ep_idx, {})
         ep_length = int(ep_meta.get("length", 0))
@@ -206,12 +248,22 @@ class LeRobotV21InitDataset(Dataset):
         max_start = max(0, ep_length - self.kir_context_len - 1)
         if max_start < self.history_frame_offset:
             raise ValueError(f"Episode {ep_idx} is too short for the requested history")
-        if self.random_start_frame and max_start > self.history_frame_offset:
-            start_frame = int(
-                np.random.randint(self.history_frame_offset, max_start + 1)
+        if start_frame is None:
+            if self.random_start_frame and max_start > self.history_frame_offset:
+                start_frame = int(
+                    np.random.randint(self.history_frame_offset, max_start + 1)
+                )
+            else:
+                start_frame = self.history_frame_offset
+        if (
+            type(start_frame) is not int
+            or not self.history_frame_offset <= start_frame <= max_start
+        ):
+            raise ValueError(f"Invalid start_frame={start_frame} for episode {ep_idx}")
+        if reward_history_frames < 0 or reward_history_frames > start_frame + 1:
+            raise ValueError(
+                "Reward history must be non-negative and end at the start frame"
             )
-        else:
-            start_frame = self.history_frame_offset
 
         # Compute the frame indices we need to decode.
         wanted_indices: list[int] = [start_frame]
@@ -239,6 +291,14 @@ class LeRobotV21InitDataset(Dataset):
         frames_uint8 = self._decode_video_frames(
             video_path, wanted_indices
         )  # (T, H, W, 3) uint8
+        reward_history = None
+        if reward_history_frames:
+            indices = list(
+                range(start_frame - reward_history_frames + 1, start_frame + 1)
+            )
+            reward_history = torch.from_numpy(
+                self._decode_video_frames(video_path, indices)
+            ).permute(0, 3, 1, 2)
 
         # Extract state / action rows.
         state_all = self._table_column_as_array(
@@ -306,6 +366,7 @@ class LeRobotV21InitDataset(Dataset):
             "target_items": target_items,
             "task": task_text,
             "episode_index": ep_idx,
+            "reward_history": reward_history,
             "dataset_meta": {
                 "episode_length": ep_length,
                 "start_frame": start_frame,
@@ -456,11 +517,26 @@ class MixedLeRobotV21InitDataset(Dataset):
         return self.offsets[-1]
 
     def __getitem__(self, index: int) -> dict[str, Any]:
-        source_index = bisect_right(self.offsets, int(index)) - 1
-        if source_index < 0 or source_index >= len(self.datasets):
+        return self.get_at_frame(index)
+
+    def _locate(self, index: int) -> tuple[int, int]:
+        if not 0 <= int(index) < len(self):
             raise IndexError(index)
+        source_index = bisect_right(self.offsets, int(index)) - 1
         local_index = int(index) - self.offsets[source_index]
-        item = self.datasets[source_index][local_index]
+        return source_index, local_index
+
+    def handover_start_frame(self, index: int, max_offset: int = 30) -> int | None:
+        source, local = self._locate(index)
+        return self.datasets[source].handover_start_frame(local, max_offset)
+
+    def get_at_frame(
+        self, index: int, start_frame: int | None = None, **kwargs
+    ) -> dict[str, Any]:
+        source_index, local_index = self._locate(index)
+        item = self.datasets[source_index].get_at_frame(
+            local_index, start_frame, **kwargs
+        )
         item["dataset_meta"]["source_index"] = source_index
         item["dataset_meta"]["source_path"] = str(self.datasets[source_index].root)
         return item

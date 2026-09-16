@@ -22,6 +22,9 @@ def dry_run(**extra):
         "ACTOR_LRS",
         "SEED_IDS",
         "TRAIN_WM_STEPS",
+        "KIR_ENABLED",
+        "KIR_PROBABILITY",
+        "KIR_MAX_OFFSET_FRAMES",
         "REPO_ROOT",
     ):
         env.pop(key, None)
@@ -131,6 +134,117 @@ def test_intermediate_noise_is_supported():
     assert "wm_scratch_r32_n02_gb128_s1234" in result.stdout
 
 
+def test_kir_is_train_only_and_has_a_distinct_name():
+    row = manifest(KIR_ENABLED="true")[0]
+    assert row["env.train.enable_kir"] == "true"
+    assert row["env.eval.enable_kir"] == "false"
+    assert row["env.train.kir_probability"] == "0.5"
+    assert row["env.train.kir_max_offset_frames"] == "30"
+    assert (
+        row["runner.logger.experiment_name"]
+        == "wm_scratch_r32_n03_gb128_kirhandp50_s1234"
+    )
+    assert (
+        row["env.train.num_inference_steps"]
+        == row["env.eval.num_inference_steps"]
+        == "35"
+    )
+    assert "env.train.enable_kir" not in manifest()[0]
+
+
+@pytest.mark.parametrize(
+    "extra,changed_key,expected,suffix",
+    [
+        ({"KIR_PROBABILITY": "1.0"}, "env.train.kir_probability", "1.0", "kirhandp100"),
+        (
+            {"KIR_MAX_OFFSET_FRAMES": "15"},
+            "env.train.kir_max_offset_frames",
+            "15",
+            "kirhandp50_off15",
+        ),
+    ],
+)
+def test_kir_ablation_changes_only_one_setting_and_names(
+    extra, changed_key, expected, suffix
+):
+    baseline = manifest(KIR_ENABLED="true")[0]
+    variant = manifest(KIR_ENABLED="true", **extra)[0]
+    assert variant[changed_key] == expected
+    assert variant["runner.logger.experiment_name"].endswith(f"_{suffix}_s1234")
+    assert {key for key in baseline if baseline[key] != variant[key]} == {
+        changed_key,
+        "runner.logger.experiment_name",
+        "--job-name",
+        "--output",
+        "--error",
+    }
+
+
+def test_overnight_kir_set_has_five_unique_new_names():
+    rows = manifest(KIR_ENABLED="true", SEED_IDS="1 2")
+    rows += manifest(KIR_ENABLED="true", KIR_PROBABILITY="1.0")
+    rows += manifest(KIR_ENABLED="true", KIR_MAX_OFFSET_FRAMES="15")
+    rows += manifest(KIR_ENABLED="true", TRAIN_WM_STEPS="15")
+    names = {row["runner.logger.experiment_name"] for row in rows}
+    assert len(rows) == len(names) == 5
+    assert manifest(KIR_ENABLED="true")[0]["runner.logger.experiment_name"] not in names
+    for row in rows:
+        assert row["env.eval.enable_kir"] == "false"
+        assert row["env.eval.num_inference_steps"] == "35"
+        assert row["env.eval.seed"] == "0"
+        assert row["actor.optim.lr"] == "5e-6"
+        assert row["actor.global_batch_size"] == "128"
+        assert row["runner.resume_dir"] == row["runner.ckpt_path"] == "null"
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [{}, {"KIR_PROBABILITY": "1.0"}, {"KIR_MAX_OFFSET_FRAMES": "15"}],
+)
+def test_kir_submission_composes_and_changes_only_training_reset(monkeypatch, extra):
+    from hydra import compose, initialize_config_dir
+    from omegaconf import OmegaConf
+
+    monkeypatch.setenv("EMBODIED_PATH", str(REPO / "examples/embodiment"))
+    monkeypatch.setenv("DREAMDOJO_GPUS", "0-7")
+    configs = []
+    for enabled in ("false", "true"):
+        result = dry_run(
+            WM_VARIANTS="scratch_r32",
+            NOISE_LEVELS="0.3",
+            KIR_ENABLED=enabled,
+            **(extra if enabled == "true" else {}),
+        )
+        assert result.returncode == 0, result.stderr
+        tokens = shlex.split(result.stdout.strip())
+        entry = next(
+            i for i, token in enumerate(tokens) if token.endswith("/train_chain.slurm")
+        )
+        with initialize_config_dir(
+            config_dir=str(REPO / "examples/embodiment/config"), version_base="1.1"
+        ):
+            cfg = compose(
+                config_name="dreamdojo_trocar_grpo_gr00t_n1d7",
+                overrides=tokens[entry + 1 :],
+            )
+        configs.append(OmegaConf.to_container(cfg, resolve=True))
+    baseline, kir = configs
+    assert kir["env"]["train"]["enable_kir"] is True
+    assert kir["env"]["eval"]["enable_kir"] is False
+    assert kir["env"]["train"]["total_num_envs"] == 64
+    assert kir["env"]["train"]["rollout_epoch"] == 2
+    assert kir["actor"]["global_batch_size"] == 128
+    assert kir["actor"]["micro_batch_size"] == 8
+    assert kir["runner"]["max_epochs"] == 1000
+    kir["env"]["train"]["enable_kir"] = False
+    for key in ("kir_probability", "kir_max_offset_frames"):
+        kir["env"]["train"][key] = baseline["env"]["train"][key]
+    kir["runner"]["logger"]["experiment_name"] = baseline["runner"]["logger"][
+        "experiment_name"
+    ]
+    assert kir == baseline
+
+
 def test_learning_rate_ablation_has_distinct_names_and_same_wm():
     result = dry_run(
         WM_VARIANTS="scratch_r32",
@@ -169,6 +283,12 @@ def test_learning_rate_ablation_has_distinct_names_and_same_wm():
         {"SEED_IDS": "1.5"},
         {"SEED_IDS": "10000"},
         {"TRAIN_WM_STEPS": "5"},
+        {"KIR_ENABLED": "yes"},
+        {"KIR_ENABLED": "true", "KIR_PROBABILITY": "0.75"},
+        {"KIR_ENABLED": "true", "KIR_MAX_OFFSET_FRAMES": "0"},
+        {"KIR_ENABLED": "true", "KIR_MAX_OFFSET_FRAMES": "15.0"},
+        {"KIR_PROBABILITY": "1.0"},
+        {"KIR_MAX_OFFSET_FRAMES": "15"},
     ],
 )
 def test_reject_invalid_matrix_before_submission(extra):

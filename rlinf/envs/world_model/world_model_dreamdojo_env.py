@@ -86,6 +86,20 @@ class DreamDojoEnv(BaseWorldEnv):
         self.condition_frame_length = int(cfg.get("condition_frame_length", 1))
         self.image_size = tuple(cfg.get("image_size", (480, 640)))
         self.enable_kir = bool(cfg.get("enable_kir", False))
+        self.kir_probability = float(cfg.get("kir_probability", 0.5))
+        self.kir_max_offset_frames = int(cfg.get("kir_max_offset_frames", 30))
+        if not 0 <= self.kir_probability <= 1 or self.kir_max_offset_frames < 1:
+            raise ValueError("Invalid KIR probability or offset")
+        if self.enable_kir and (
+            cfg.get("is_eval", False) or cfg.get("random_start_frame", False)
+        ):
+            raise ValueError(
+                "KIR is train-only and incompatible with random_start_frame"
+            )
+        # Separate RNG: enabling KIR does not perturb the episode/source sampler.
+        self._kir_generator = torch.Generator().manual_seed(
+            int(cfg.seed) + int(seed_offset) + 100000
+        )
         self.seed_offset = int(seed_offset)
         super().__init__(
             cfg,
@@ -102,6 +116,26 @@ class DreamDojoEnv(BaseWorldEnv):
         self.num_group = self.num_envs // self.group_size
         self._init_eval_mask()
 
+        self.video_audit = None
+        if cfg.get("video_audit_dir"):
+            if (
+                not cfg.get("is_eval", False)
+                or not self.eval_unique_episodes
+                or cfg.max_episode_steps != 240
+                or not cfg.reward_model.get("duplicate_for_30fps", True)
+            ):
+                raise ValueError(
+                    "Video audit requires unique native eval, 240 actions and 30Hz reward scoring"
+                )
+            from rlinf.envs.world_model.dreamdojo_reward import THRESHOLDS
+            from rlinf.envs.world_model.dreamdojo_video_audit import MilestoneVideoAudit
+
+            self.video_audit = MilestoneVideoAudit(
+                Path(cfg.video_audit_dir) / f"seed_{self.seed_offset}",
+                cfg.get("video_audit_label") or "GR00T policy / DreamDojo WM",
+                THRESHOLDS,
+            )
+
         self._generator = torch.Generator()
         self._generator.manual_seed(self.seed)
         self.update_reset_state_ids()
@@ -117,9 +151,9 @@ class DreamDojoEnv(BaseWorldEnv):
 
         if self.chunk != 12 or self.action_dim != 28:
             raise ValueError("DreamDojo G1 currently requires chunk=12, action_dim=28")
-        if self.condition_frame_length != 1 or self.enable_kir or self.auto_reset:
+        if self.condition_frame_length != 1 or self.auto_reset:
             raise ValueError(
-                "DreamDojo requires one condition frame, KIR off, auto_reset off"
+                "DreamDojo requires one condition frame and auto_reset off"
             )
 
         # ---- Build heavy components ----
@@ -191,7 +225,8 @@ class DreamDojoEnv(BaseWorldEnv):
             "video_key": cfg.get("video_key", "head_view"),
             "state_dim": self.state_dim,
             "action_dim": self.action_dim,
-            "enable_kir": self.enable_kir,
+            # DreamDojo KIR changes the reset state, not Wan's multi-frame context.
+            "enable_kir": False,
             "kir_context_len": self.condition_frame_length - 1,
             "image_size": self.image_size,
             "episodes": cfg.get("episodes"),
@@ -320,6 +355,20 @@ class DreamDojoEnv(BaseWorldEnv):
             episode_info[f"{name}_prob_max"] = (
                 self.last_chunk_probs[:, :, head].amax(dim=1).clone()
             )
+        if getattr(self, "enable_kir", False):
+            episode_info["kir_fraction"] = self.reset_is_kir.float().clone()
+            episode_info["kir_eligible_fraction"] = (
+                self.reset_kir_eligible.float().clone()
+            )
+            episode_info["reset_frame"] = self.reset_start_frames.float().clone()
+            episode_info["initial_stage"] = self.reset_initial_stage.float().clone()
+            # Conditional means are recovered as numerator / fraction in reports.
+            episode_info["kir_success_numerator"] = (
+                self.success_once.float() * self.reset_is_kir
+            )
+            episode_info["original_success_numerator"] = (
+                self.success_once.float() * ~self.reset_is_kir
+            )
         infos["episode"] = episode_info
         return infos
 
@@ -333,6 +382,58 @@ class DreamDojoEnv(BaseWorldEnv):
     # ------------------------------------------------------------------ #
     #                       Reset / rollout / step                        #
     # ------------------------------------------------------------------ #
+
+    def _load_reset_items(self, episode_indices):
+        """Choose once per GRPO group; never change the sampled episode/source."""
+        if not getattr(self, "enable_kir", False):
+            return [self.dataset[int(index)] for index in episode_indices]
+        if len(episode_indices) != self.num_envs or self.num_envs % self.group_size:
+            raise ValueError("KIR reset requires complete GRPO groups")
+        items, flags, eligible_flags, starts = [], [], [], []
+        self.reset_manifest = []
+        for offset in range(0, self.num_envs, self.group_size):
+            indices = [
+                int(index)
+                for index in episode_indices[offset : offset + self.group_size]
+            ]
+            if len(set(indices)) != 1:
+                raise ValueError("KIR group members must share the same episode")
+            index = indices[0]
+            start = self.dataset.handover_start_frame(index, self.kir_max_offset_frames)
+            eligible = start is not None
+            use_kir = (
+                eligible
+                and torch.rand((), generator=self._kir_generator).item()
+                < self.kir_probability
+            )
+            item = self.dataset.get_at_frame(
+                index,
+                start if use_kir else None,
+                reward_history_frames=17 if use_kir else 0,
+            )
+            actual_start = item["dataset_meta"]["start_frame"]
+            items.extend([item] * self.group_size)
+            flags.extend([use_kir] * self.group_size)
+            eligible_flags.extend([eligible] * self.group_size)
+            starts.extend([actual_start] * self.group_size)
+            self.reset_manifest.append(
+                {
+                    "flat_episode_index": index,
+                    "episode_index": item["episode_index"],
+                    "source_path": item["dataset_meta"].get("source_path"),
+                    "start_frame": actual_start,
+                    "is_kir": use_kir,
+                    "eligible": eligible,
+                    "initial_stage": int(use_kir),
+                }
+            )
+        self.reset_is_kir = torch.tensor(flags, device=self.device, dtype=torch.bool)
+        self.reset_kir_eligible = torch.tensor(
+            eligible_flags, device=self.device, dtype=torch.bool
+        )
+        self.reset_start_frames = torch.tensor(starts, device=self.device)
+        self.reset_initial_stage = self.reset_is_kir.long()
+        return items
 
     @torch.no_grad()
     def reset(self, *, seed=None, options=None, episode_indices=None):
@@ -353,8 +454,10 @@ class DreamDojoEnv(BaseWorldEnv):
         init_ee_poses: list = []
 
         # 2. For each env, load its init episode and build condition frames.
-        for env_idx, episode_idx in enumerate(episode_indices):
-            episode_data = self.dataset[int(episode_idx)]
+        reset_items = self._load_reset_items(episode_indices)
+        for env_idx, (episode_idx, episode_data) in enumerate(
+            zip(episode_indices, reset_items)
+        ):
             if not episode_data.get("start_items"):
                 raise ValueError(f"Empty start_items for episode {episode_idx}")
 
@@ -367,7 +470,9 @@ class DreamDojoEnv(BaseWorldEnv):
                     f"No 'image' key in first frame of episode {episode_idx}"
                 )
 
-            img_tensor = first_frame["image"]  # [3, H, W] float in [0, 1]
+            # KIR group members share the same decoded item. Normalization below
+            # is in-place, so each environment must own its input image.
+            img_tensor = first_frame["image"].clone()  # [3, H, W] in [0, 1]
 
             if "observation.state" in first_frame:
                 state = torch.as_tensor(first_frame["observation.state"]).float()
@@ -415,9 +520,31 @@ class DreamDojoEnv(BaseWorldEnv):
         self.task_descriptions = task_descriptions
         self.init_ee_poses = init_ee_poses
         self.reward_model.reset()
+        if getattr(self, "enable_kir", False) and self.reset_is_kir.any():
+            selected = self.reset_is_kir.nonzero(as_tuple=False).flatten().tolist()
+            histories = torch.stack(
+                [reset_items[index]["reward_history"] for index in selected]
+            )
+            self.reward_model.prime_handover(histories, selected)
         self._render_frames = None
 
         self._reset_metrics()
+        if getattr(self, "video_audit", None) is not None:
+            cases = [
+                {
+                    "flat_episode_index": int(episode_index),
+                    "episode_index": int(item["episode_index"]),
+                    "source_path": item["dataset_meta"]["source_path"],
+                    "start_frame": int(item["dataset_meta"]["start_frame"]),
+                    "valid": bool(self._eval_valid_mask[index]),
+                }
+                for index, (episode_index, item) in enumerate(
+                    zip(episode_indices, reset_items, strict=True)
+                )
+            ]
+            self.video_audit.start(
+                self._wrap_obs()["main_images"].detach().cpu().numpy(), cases
+            )
         return self._wrap_obs(), {}
 
     @torch.no_grad()
@@ -464,6 +591,12 @@ class DreamDojoEnv(BaseWorldEnv):
             chunk_truncations &= self._eval_valid_mask[:, None]
         infos: dict = {}
         infos = self._record_metrics(step_reward, success_mask, infos)
+
+        if (
+            getattr(self, "video_audit", None) is not None
+            and self.elapsed_steps >= self.cfg.max_episode_steps
+        ):
+            self.video_audit.finish()
 
         extracted_obs = self._wrap_obs()
 
@@ -558,7 +691,21 @@ class DreamDojoEnv(BaseWorldEnv):
         frames = self.current_obs[:, :, 0, -self.wm_steps_per_chunk :].permute(
             0, 2, 1, 3, 4
         )
+        audit = getattr(self, "video_audit", None)
+        stage_before = self.reward_model.stage.clone() if audit is not None else None
         frame_rewards, self.last_chunk_probs = self.reward_model.score_chunk(frames)
+        if audit is not None:
+            stages = stage_before[:, None] + frame_rewards.cumsum(dim=1)
+            audit.append(
+                ((frames + 1) * 127.5)
+                .clamp(0, 255)
+                .to(torch.uint8)
+                .permute(0, 1, 3, 4, 2)
+                .cpu()
+                .numpy(),
+                self.last_chunk_probs.detach().cpu().numpy(),
+                stages.detach().cpu().numpy(),
+            )
         # Images arrive after two control commands; pay at that boundary.
         rewards = frame_rewards.new_zeros(self.num_envs, self.chunk)
         rewards[:, 1::2] = frame_rewards

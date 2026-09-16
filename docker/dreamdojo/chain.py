@@ -117,6 +117,18 @@ def main(overrides: list[str]) -> int:
             repo / "docker/dreamdojo" / name
             for name in ("chain.py", "train_chain.slurm", "run_cluster.slurm")
         ]
+        if environ.get("DREAMDOJO_KIR_SOURCE_ROOT"):
+            source = Path(environ["DREAMDOJO_KIR_SOURCE_ROOT"])
+            files += [
+                source / name
+                for name in (
+                    "rlinf/data/datasets/lerobot_world_model.py",
+                    "rlinf/envs/world_model/world_model_dreamdojo_env.py",
+                    "rlinf/envs/world_model/dreamdojo_reward.py",
+                    "examples/embodiment/config/env/dreamdojo_trocar.yaml",
+                    "toolkits/world_model/dreamdojo_validation.py",
+                )
+            ]
         if environ.get("RLINF_CHAIN_SOURCE_ROOT"):
             source = Path(environ["RLINF_CHAIN_SOURCE_ROOT"])
             files += [

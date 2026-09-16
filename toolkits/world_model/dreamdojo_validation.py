@@ -401,6 +401,234 @@ def world_model(args):
     save_json(args.output / "results.json", all_results)
 
 
+def prepare_diagnostic_policy(model, device="cuda"):
+    """Prepare in place: GR00T's eval override does not return the model."""
+    model.to(device)
+    model.eval()
+    return model
+
+
+def kir(args):
+    """Validate a real KIR reset/bridge, recorded suffixes, and an 8-way policy group.
+
+    Diagnostic only. Native training/evaluation remain in the original runner.
+    Each selected training episode is one complete group, never eight start times.
+    """
+    import imageio.v2 as imageio
+    import numpy as np
+    import torch
+    from omegaconf import OmegaConf
+
+    from rlinf.envs.world_model.world_model_dreamdojo_env import DreamDojoEnv
+    from rlinf.models.embodiment.gr00t.gr00t_n1d7 import get_model
+    from rlinf.scheduler import Worker
+
+    if len(args.steps) != 1:
+        raise ValueError("KIR check takes one WM step setting at a time")
+    cfg = config()
+    cfg.actor.model.rl_head_config.noise_level = 0.3
+    cfg.actor.model.rl_head_config.action_noise_scale = 0.0
+    cfg.actor.model.rl_head_config.noise_anneal = False
+    ec = OmegaConf.create(OmegaConf.to_container(cfg.env.train))
+    ec.initial_image_path = str(args.dataset)
+    ec.enable_kir = True
+    ec.kir_probability = 1.0
+    ec.group_size = ec.total_num_envs = 8
+    ec.enable_offload = False
+    ec.num_inference_steps = args.steps[0]
+    ec.max_episode_steps = args.chunks * 12
+    if args.wm_experiment:
+        ec.experiment_name = args.wm_experiment
+    Worker.torch_device_type, Worker.torch_platform = "cuda", torch.cuda
+    torch.manual_seed(args.seed)
+    np.random.seed(args.seed)
+    model = prepare_diagnostic_policy(get_model(cfg.actor.model))
+    env = DreamDojoEnv(ec, 8, 0, 1)
+    OmegaConf.save(ec, args.output / "env_config.yaml")
+    OmegaConf.save(cfg.actor.model, args.output / "policy_config.yaml")
+    episodes = load_episodes(args.dataset, args.episodes)
+    results = []
+    for episode in episodes:
+        index = episode["index"]
+        start = env.dataset.handover_start_frame(index, ec.kir_max_offset_frames)
+        if start is None:
+            raise ValueError(f"Episode {index} has no eligible handover annotation")
+        n_chunks = min(args.chunks, (len(episode["video"]) - 1 - start) // 12)
+        if n_chunks < 3:
+            raise ValueError("Need at least three recorded action chunks after KIR")
+        # Compare the executed six WM conditioning rows to the existing raw-30Hz
+        # bridge reference, at the actual nonzero reset position.
+        a, s = episode["action"], episode["state"]
+        raw = torch.tensor(a[start - 2 : start + 23], device="cuda")
+        state = torch.tensor(s[start - 2], device="cuda")
+        reference = env.action_bridge.encode_30hz_actions(raw, state)
+        encoded = env.action_bridge.encode_policy_chunk(
+            raw[:1],
+            torch.tensor(a[start : start + 12], device="cuda")[None],
+            state[None],
+        )
+        torch.testing.assert_close(encoded[0, :6], reference[:6], atol=1e-6, rtol=1e-6)
+        initial = env.dataset.get_at_frame(index, start, reward_history_frames=17)
+        first = initial["start_items"][0]
+        torch.testing.assert_close(first["observation.state"], torch.tensor(s[start]))
+        torch.testing.assert_close(
+            first["wm_previous_state"], torch.tensor(s[start - 2])
+        )
+        torch.testing.assert_close(
+            first["wm_previous_action"], torch.tensor(a[start - 2])
+        )
+        futures = np.arange(start + 2, start + n_chunks * 12 + 1, 2)
+        real_video = episode["video"][np.r_[start, futures]]
+        episode_dir = args.output / f"episode_{index:06d}"
+        episode_dir.mkdir()
+        imageio.mimwrite(
+            episode_dir / "real.mp4", real_video, fps=15, codec="libx264", quality=8
+        )
+        env.reset(episode_indices=[index] * 8)
+        real_rewards, _ = env.reward_model.score_chunk(
+            torch.from_numpy(episode["video"][futures])
+            .permute(0, 3, 1, 2)[None]
+            .repeat(8, 1, 1, 1, 1)
+        )
+        real_stage = int(env.reward_model.stage[0])
+        galleries = [real_video]
+        modes = (
+            "recorded_teacher_forced",
+            "recorded_closed_loop_oracle_history",
+            "recorded_closed_loop",
+            "policy",
+        )
+        for mode in modes:
+            torch.manual_seed(args.seed + index)
+            np.random.seed(args.seed + index)
+            obs, _ = env.reset(episode_indices=[index] * 8)
+            assert env.reset_is_kir.all() and (env.reset_start_frames == start).all()
+            assert (env.reward_model.stage == 1).all() and not env.returns.any()
+            torch.testing.assert_close(
+                obs["main_images"], obs["main_images"][:1].expand_as(obs["main_images"])
+            )
+            assert env.current_obs.min() >= -1 and env.current_obs.max() <= 1
+            torch.testing.assert_close(
+                obs["states"], torch.tensor(s[start], device="cuda")[None].repeat(8, 1)
+            )
+            images = [env.capture_image().cpu().numpy()]
+            rewards, probs, actions, previous_states, previous_actions = (
+                [],
+                [],
+                [],
+                [],
+                [],
+            )
+            mode_start = time.monotonic()
+            for chunk in range(n_chunks):
+                t = start + chunk * 12
+                if mode == "recorded_teacher_forced":
+                    frame = torch.tensor(episode["video"][t], device="cuda").permute(
+                        2, 0, 1
+                    )
+                    env.current_obs = (frame.float() / 127.5 - 1)[
+                        None, :, None, None
+                    ].repeat(8, 1, 1, 1, 1, 1)
+                if mode in (
+                    "recorded_teacher_forced",
+                    "recorded_closed_loop_oracle_history",
+                ):
+                    env.previous_action = torch.tensor(a[t - 2], device="cuda")[
+                        None
+                    ].repeat(8, 1)
+                    env.previous_state = torch.tensor(s[t - 2], device="cuda")[
+                        None
+                    ].repeat(8, 1)
+                previous_states.append(env.previous_state.float().cpu().numpy().copy())
+                previous_actions.append(
+                    env.previous_action.float().cpu().numpy().copy()
+                )
+                with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
+                    if mode == "policy":
+                        action, _ = model.predict_action_batch(obs, mode="train")
+                    else:
+                        action = torch.tensor(a[t : t + 12], device="cuda")[
+                            None
+                        ].repeat(8, 1, 1)
+                    next_obs, r, _, _, _ = env.chunk_step(action)
+                obs = next_obs[-1]
+                images.append(env.capture_image().cpu().numpy())
+                rewards.append(r.cpu().numpy())
+                probs.append(env.last_chunk_probs.cpu().numpy())
+                actions.append(torch.as_tensor(action).float().cpu().numpy())
+                print(
+                    json.dumps(
+                        {
+                            "episode": index,
+                            "mode": mode,
+                            "chunk": chunk + 1,
+                            "stage": env.reward_model.stage.tolist(),
+                        }
+                    ),
+                    flush=True,
+                )
+            video = np.concatenate(images, axis=1)
+            gallery = video[0]
+            galleries.append(gallery)
+            total = np.concatenate(rewards, axis=1).sum(axis=1)
+            assert (
+                np.isfinite(total).all() and (total >= 0).all() and (total <= 2).all()
+            )
+            directory = episode_dir / mode
+            directory.mkdir()
+            for sample in range(8):
+                imageio.mimwrite(
+                    directory / f"sample_{sample:02d}.mp4",
+                    video[sample],
+                    fps=15,
+                    codec="libx264",
+                    quality=8,
+                )
+            np.savez_compressed(
+                directory / "trace.npz",
+                actions=np.stack(actions),
+                rewards=np.stack(rewards),
+                probabilities=np.stack(probs),
+                previous_states=np.stack(previous_states),
+                previous_actions=np.stack(previous_actions),
+            )
+            record = {
+                "episode": index,
+                "start_frame": start,
+                "mode": mode,
+                "initial_stage": 1,
+                "chunks": n_chunks,
+                "real_suffix_stage": real_stage,
+                "real_suffix_return": float(real_rewards[0].sum()),
+                "stages": env.reward_model.stage.tolist(),
+                "returns": total.tolist(),
+                "success_fraction": float((env.reward_model.stage == 3).float().mean()),
+                "group_return_std": float(total.std()),
+                "first_chunk_action_std": float(np.std(actions[0], axis=0).mean()),
+                "wall_seconds": time.monotonic() - mode_start,
+            }
+            results.append(record)
+            save_json(args.output / "results.json", results)
+            print(json.dumps(record), flush=True)
+        # Label each row: oracle history separates proprio drift from image drift.
+        from PIL import Image, ImageDraw
+
+        chosen = np.linspace(0, len(real_video) - 1, 5).astype(int)
+        rows = [
+            np.concatenate(
+                [np.asarray(Image.fromarray(v[t]).resize((256, 192))) for t in chosen],
+                axis=1,
+            )
+            for v in galleries
+        ]
+        comparison = Image.fromarray(np.concatenate(rows, axis=0))
+        draw = ImageDraw.Draw(comparison)
+        for row, label in enumerate(("real", *modes)):
+            draw.rectangle((0, row * 192, 320, row * 192 + 20), fill="black")
+            draw.text((4, row * 192 + 3), label, fill="white")
+        comparison.save(episode_dir / "comparison.png")
+
+
 def checkpoint_case(checkpoint):
     """Name new checkpoints without mislabeling them as the historical step20."""
     if checkpoint == "base":
@@ -722,6 +950,7 @@ def main():
             "report",
             "real_reward",
             "training_report",
+            "kir",
         ],
     )
     parser.add_argument("--output", type=Path, required=True)
@@ -737,6 +966,7 @@ def main():
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--checkpoints", nargs="+", default=["base"])
     parser.add_argument("--inputs", type=Path, nargs="+", default=[])
+    parser.add_argument("--wm-experiment", default=None)
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=False)
     args.output = args.output.resolve()

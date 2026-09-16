@@ -24,6 +24,26 @@ read -r -a LRS <<< "${ACTOR_LRS:-5e-6}"
 # Replicate 0 preserves the original actor=1234 / train-env=0 pairing.
 read -r -a SEEDS <<< "${SEED_IDS:-0}"
 TRAIN_WM_STEPS="${TRAIN_WM_STEPS:-35}"
+KIR_ENABLED="${KIR_ENABLED:-false}"
+KIR_PROBABILITY="${KIR_PROBABILITY:-0.5}"
+KIR_MAX_OFFSET_FRAMES="${KIR_MAX_OFFSET_FRAMES:-30}"
+[[ "$KIR_ENABLED" == false || "$KIR_ENABLED" == true ]] || { echo "Invalid KIR_ENABLED" >&2; exit 2; }
+[[ "$KIR_PROBABILITY" == 0.5 || "$KIR_PROBABILITY" == 1.0 ]] || { echo "Invalid KIR_PROBABILITY" >&2; exit 2; }
+[[ "$KIR_MAX_OFFSET_FRAMES" == 15 || "$KIR_MAX_OFFSET_FRAMES" == 30 ]] || { echo "Invalid KIR_MAX_OFFSET_FRAMES" >&2; exit 2; }
+if [[ "$KIR_ENABLED" == false && ( "$KIR_PROBABILITY" != 0.5 || "$KIR_MAX_OFFSET_FRAMES" != 30 ) ]]; then
+    echo "Non-default KIR settings require KIR_ENABLED=true" >&2; exit 2;
+fi
+kir_suffix=""
+kir_args=()
+if [[ "$KIR_ENABLED" == true ]]; then
+    kir_suffix="_kirhandp50"
+    if [[ "$KIR_PROBABILITY" == 1.0 ]]; then kir_suffix="_kirhandp100"; fi
+    if [[ "$KIR_MAX_OFFSET_FRAMES" != 30 ]]; then kir_suffix="${kir_suffix}_off${KIR_MAX_OFFSET_FRAMES}"; fi
+    kir_args=(env.train.enable_kir=true "env.train.kir_probability=${KIR_PROBABILITY}" "env.train.kir_max_offset_frames=${KIR_MAX_OFFSET_FRAMES}" env.eval.enable_kir=false)
+    if [[ "$MODE" == --submit && -z "${DREAMDOJO_KIR_SOURCE_ROOT:-}" ]]; then
+        echo "KIR requires the versioned DREAMDOJO_KIR_SOURCE_ROOT runtime" >&2; exit 2;
+    fi
+fi
 for wm in "${WMS[@]}"; do
     [[ "$wm" == r64 || "$wm" == scratch_r32 ]] || { echo "Invalid WM: $wm" >&2; exit 2; }
 done
@@ -86,10 +106,10 @@ for wm in "${WMS[@]}"; do
             lr_suffix="${lr_suffix/./p}"
             seed_suffix=""
             if [[ "$seed" != 0 ]]; then seed_suffix="-s${actor_seed}"; fi
-            name="wm_${wm}_n${noise/./}_gb${batch}${lr_suffix}${wm_suffix}_s${actor_seed}"
+            name="wm_${wm}_n${noise/./}_gb${batch}${lr_suffix}${wm_suffix}${kir_suffix}_s${actor_seed}"
             args=(
                 --parsable --export=ALL --partition=batch --time=04:00:00
-                "--job-name=dd-${wm}-n${noise/./}-b${batch}${lr_suffix}${wm_suffix}${seed_suffix}"
+                "--job-name=dd-${wm}-n${noise/./}-b${batch}${lr_suffix}${wm_suffix}${kir_suffix}${seed_suffix}"
                 "--chdir=${REPO_ROOT}"
                 "--output=${SUBMISSIONS}/${name}-%j.out"
                 "--error=${SUBMISSIONS}/${name}-%j.err"
@@ -107,6 +127,7 @@ for wm in "${WMS[@]}"; do
                 "actor.model.rl_head_config.noise_level=${noise}"
                 actor.model.rl_head_config.action_noise_scale=0.0
                 actor.model.rl_head_config.noise_anneal=false
+                "${kir_args[@]}"
             )
             if [[ "$MODE" == --dry-run ]]; then
                 printf 'MAX_RUNS=18 CHAIN_TIMEOUT=3.9h DREAMDOJO_WM_CHECKPOINT=%q sbatch ' "$DREAMDOJO_WM_CHECKPOINT"

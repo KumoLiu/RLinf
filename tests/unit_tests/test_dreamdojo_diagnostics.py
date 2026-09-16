@@ -13,6 +13,23 @@ from rlinf.utils.metric_utils import compute_group_reward_metrics
 from toolkits.world_model import dreamdojo_validation as validation
 
 
+def test_diagnostic_keeps_model_when_eval_returns_none():
+    calls = []
+
+    class Policy:
+        def to(self, device):
+            calls.append(("to", device))
+            return self
+
+        def eval(self):
+            calls.append(("eval",))
+            # Match the actual GR00T override, which returns None.
+
+    model = Policy()
+    assert validation.prepare_diagnostic_policy(model, "cpu") is model
+    assert calls == [("to", "cpu"), ("eval",)]
+
+
 @pytest.mark.parametrize("step", [5, 10, 15, 20])
 def test_checkpoint_labels_are_not_tied_to_historical_step20(step):
     assert validation.checkpoint_case(

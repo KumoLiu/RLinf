@@ -103,7 +103,13 @@ def test_slurm_uses_shared_checkpoints_readonly_without_copying(tmp_path):
         "SLURM_JOB_ID": "test123",
         "SLURM_SUBMIT_DIR": str(REPO),
     }
-    for key in ("DREAMDOJO_EXTERNAL_ROOT", "NCCL_P2P_DISABLE", "NCCL_P2P_LEVEL"):
+    for key in (
+        "DREAMDOJO_EXTERNAL_ROOT",
+        "DREAMDOJO_KIR_SOURCE_ROOT",
+        "DREAMDOJO_VIDEO_AUDIT_SOURCE_ROOT",
+        "NCCL_P2P_DISABLE",
+        "NCCL_P2P_LEVEL",
+    ):
         env.pop(key, None)
     result = subprocess.run(
         ["bash", str(REPO / "docker/dreamdojo/run_cluster.slurm"), "eval"],
@@ -154,6 +160,47 @@ def test_slurm_uses_shared_checkpoints_readonly_without_copying(tmp_path):
         text=True,
     )
     assert f"{external}:/opt/src/DreamDojo/external:ro" in supplemented.stdout
+
+    audit = tmp_path / "eval-audit"
+    env["DREAMDOJO_VIDEO_AUDIT_SOURCE_ROOT"] = str(audit)
+    missing_audit = subprocess.run(
+        ["bash", str(REPO / "docker/dreamdojo/run_cluster.slurm"), "eval"],
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert missing_audit.returncode != 0
+    assert "Missing video audit source" in missing_audit.stderr
+    for relative in (
+        "rlinf/data/datasets/lerobot_world_model.py",
+        "rlinf/envs/world_model/world_model_dreamdojo_env.py",
+        "rlinf/envs/world_model/dreamdojo_reward.py",
+        "rlinf/envs/world_model/dreamdojo_video_audit.py",
+        "examples/embodiment/config/env/dreamdojo_trocar.yaml",
+    ):
+        path = audit / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("# test snapshot\n")
+    audited = subprocess.run(
+        ["bash", str(REPO / "docker/dreamdojo/run_cluster.slurm"), "eval"],
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert (
+        f"{audit}/rlinf/envs/world_model/dreamdojo_video_audit.py:/opt/src/RLinf/rlinf/envs/world_model/dreamdojo_video_audit.py:ro"
+        in audited.stdout
+    )
+    rejected = subprocess.run(
+        ["bash", str(REPO / "docker/dreamdojo/run_cluster.slurm"), "train"],
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert rejected.returncode != 0
+    assert "requires eval mode" in rejected.stderr
+    env.pop("DREAMDOJO_VIDEO_AUDIT_SOURCE_ROOT")
 
     verify = subprocess.run(
         ["bash", str(REPO / "docker/dreamdojo/run_cluster.slurm"), "verify"],

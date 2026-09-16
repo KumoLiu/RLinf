@@ -110,6 +110,29 @@ class BatchedMilestoneReward:
                 votes.clear()
             self.stage[index] = 0
 
+    @torch.no_grad()
+    def prime_handover(self, frames: torch.Tensor, env_indices: list[int]) -> None:
+        """Seed raw 30-Hz visual history and known picked state, without payout.
+
+        Only real frames at/before reset may be passed. Future-head confirmation
+        votes deliberately start empty: no pre-reset transition earns credit.
+        """
+        if frames.ndim != 5 or frames.shape[:3] != (len(env_indices), 17, 3):
+            raise ValueError("Expected 17 raw history frames per selected environment")
+        if len(set(env_indices)) != len(env_indices) or any(
+            index < 0 or index >= self.num_envs for index in env_indices
+        ):
+            raise ValueError("Invalid reward warmup environment indices")
+        for index in env_indices:
+            self.frame_history[index].clear()
+            for votes in self.recent[index]:
+                votes.clear()
+        for time_index in range(frames.shape[1]):
+            prepared = self._prepare(frames[:, time_index])
+            for local_index, env_index in enumerate(env_indices):
+                self.frame_history[env_index].append(prepared[local_index])
+        self.stage[env_indices] = 1
+
     def _prepare(self, frames: torch.Tensor) -> torch.Tensor:
         if frames.dtype == torch.uint8:
             frames_uint8 = frames

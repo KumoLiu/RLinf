@@ -29,6 +29,40 @@ export DREAMDOJO_LAM_CHECKPOINT="${DREAMDOJO_LAM_CHECKPOINT:-${CHECKPOINTS}/Drea
 [[ -f "${IMAGE}" ]] || { echo "Missing image: ${IMAGE}" >&2; exit 1; }
 mkdir -p "${OUTPUTS}"
 MOUNTS="${OUTPUTS}:/outputs"
+# Independent eval audit snapshot; never update a source tree used by training.
+if [[ -n "${DREAMDOJO_VIDEO_AUDIT_SOURCE_ROOT:-}" ]]; then
+    [[ "${MODE}" == eval && -z "${DREAMDOJO_KIR_SOURCE_ROOT:-}" ]] || {
+        echo "Video audit supplement requires eval mode and no overlapping KIR supplement" >&2; exit 1;
+    }
+    for relative in \
+        rlinf/data/datasets/lerobot_world_model.py \
+        rlinf/envs/world_model/world_model_dreamdojo_env.py \
+        rlinf/envs/world_model/dreamdojo_reward.py \
+        rlinf/envs/world_model/dreamdojo_video_audit.py \
+        examples/embodiment/config/env/dreamdojo_trocar.yaml; do
+        [[ -s "${DREAMDOJO_VIDEO_AUDIT_SOURCE_ROOT}/${relative}" ]] || {
+            echo "Missing video audit source supplement: ${relative}" >&2; exit 1;
+        }
+        MOUNTS+=",${DREAMDOJO_VIDEO_AUDIT_SOURCE_ROOT}/${relative}:/opt/src/RLinf/${relative}:ro"
+    done
+    echo "Eval-only video audit source supplement (read-only): ${DREAMDOJO_VIDEO_AUDIT_SOURCE_ROOT}"
+fi
+# Deploy this entry from a NEW versioned host root for KIR experiments. Never
+# overwrite the entry used by existing chains: their source hashes are pinned.
+if [[ -n "${DREAMDOJO_KIR_SOURCE_ROOT:-}" ]]; then
+    for relative in \
+        rlinf/data/datasets/lerobot_world_model.py \
+        rlinf/envs/world_model/world_model_dreamdojo_env.py \
+        rlinf/envs/world_model/dreamdojo_reward.py \
+        examples/embodiment/config/env/dreamdojo_trocar.yaml \
+        toolkits/world_model/dreamdojo_validation.py; do
+        [[ -s "${DREAMDOJO_KIR_SOURCE_ROOT}/${relative}" ]] || {
+            echo "Missing KIR source supplement: ${relative}" >&2; exit 1;
+        }
+        MOUNTS+=",${DREAMDOJO_KIR_SOURCE_ROOT}/${relative}:/opt/src/RLinf/${relative}:ro"
+    done
+    echo "KIR source supplement (read-only): ${DREAMDOJO_KIR_SOURCE_ROOT}"
+fi
 # Versioned, explicit source supplement for v1 images predating budget support.
 # Only these two files are overlaid; never mount a mutable checkout wholesale.
 if [[ -n "${RLINF_CHAIN_SOURCE_ROOT:-}" ]]; then
@@ -115,6 +149,10 @@ srun --container-image="${IMAGE}" --container-mounts="${MOUNTS}" \
                     --config-name dreamdojo_trocar_grpo_gr00t_n1d7 \
                     runner.only_eval=true "rollout.model=\${actor.model}" \
                     "runner.logger.log_path=$RLINF_RUN_LOG" "$@"
+                ;;
+            kir-check)
+                exec /opt/venv/bin/python toolkits/world_model/dreamdojo_validation.py kir \
+                    --output "$RLINF_RUN_LOG/diagnostic" "$@"
                 ;;
             train)
                 exec bash examples/embodiment/run_dreamdojo_trocar.sh \

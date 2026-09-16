@@ -1,8 +1,8 @@
 # DreamDojo × GR00T N1.7
 
-当前训练入口、cluster 路径配置和对比实验命令见
-[DreamDojo 使用说明](docs/dreamdojo/README.md)。
+项目已经阶段性收尾。请从 [项目入口](docs/dreamdojo/README.md) 阅读：
 
-代码整理记录见 [CLEANUP.md](docs/dreamdojo/CLEANUP.md)。
-历史检查、修复、性能测试和实验记录保留在
-[docs/dreamdojo/history/](docs/dreamdojo/history/)，其中的旧启动命令不再作为当前入口。
+- [结果与保留模型](docs/dreamdojo/RESULTS.md)：220代真机66% vs SFT44%，以及WM候选的区别。
+- [运行与复现](docs/dreamdojo/RUNBOOK.md)：原生train/eval、环境和自动续跑。
+- [实现契约](docs/dreamdojo/IMPLEMENTATION.md)：动作桥、reward、KIR和已修复问题。
+- [清理记录与恢复位置](docs/dreamdojo/CLEANUP.md)：旧文档已合并，完整原文在仓库外备份。

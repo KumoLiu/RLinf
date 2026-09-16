@@ -1,7 +1,7 @@
 # Copyright 2026 The RLinf Authors.
 # SPDX-License-Identifier: Apache-2.0
 
-"""CPU tests execute native cache/method source without loading GPU models."""
+"""CPU regressions for native inference optimizations, without GPU model loads."""
 
 import ast
 import importlib.util
@@ -21,7 +21,6 @@ MODEL = (
     ROOT
     / "cosmos_predict2/_src/predict2/action/models/action_conditioned_video2world_rectified_flow_model.py"
 )
-PERF = Path(__file__).resolve().parents[2] / "toolkits/world_model/dreamdojo_perf.py"
 
 
 def cache_class():
@@ -45,43 +44,6 @@ def native_method(path, class_name, name):
     return next(
         n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == name
     )
-
-
-def test_policy_initialization_keeps_model_when_eval_returns_none():
-    """Execute the real initialization statements with GR00T's eval contract."""
-    tree = ast.parse(PERF.read_text())
-    policy = next(
-        n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "policy"
-    )
-    start = next(
-        i
-        for i, n in enumerate(policy.body)
-        if isinstance(n, ast.Assign) and ast.unparse(n.targets[0]) == "model"
-    )
-    end = next(
-        i
-        for i, n in enumerate(policy.body)
-        if isinstance(n, ast.Assign) and ast.unparse(n.targets[0]) == "episodes"
-    )
-    moves = []
-    model = SimpleNamespace(
-        to=lambda device: moves.append(device),
-        eval=lambda: moves.append("eval"),
-    )
-    namespace = {
-        "get_model": lambda cfg: model,
-        "cfg": SimpleNamespace(actor=SimpleNamespace(model="sft")),
-    }
-    exec(
-        compile(
-            ast.Module(body=policy.body[start:end], type_ignores=[]),
-            "policy_init",
-            "exec",
-        ),
-        namespace,
-    )
-    assert namespace["model"] is model
-    assert moves == ["cuda", "eval"]
 
 
 @pytest.mark.parametrize("per_worker", [False, True])

@@ -17,6 +17,10 @@ use_ordered_reset_state_ids: false
 specific_reset_id: null
 is_eval: false
 eval_unique_episodes: false
+# Optional eval-only per-case raw/annotated video + exact classifier trace.
+# Text is never fed back to the policy, WM or reward classifier.
+video_audit_dir: null
+video_audit_label: null
 
 video_cfg:
   save_video: false
@@ -48,6 +52,10 @@ video_key: head_view
 video_backend: decord
 random_start_frame: false
 enable_kir: false
+# Train-only, single-image reset near annotated handover; no Wan-style context.
+# Probability is conditional on an eligible episode, not on all sampled groups.
+kir_probability: 0.5
+kir_max_offset_frames: 30
 
 num_inference_steps: 35
 # Native 30-Hz commands: consume 6 of the 12 generated WM frames.
