@@ -1,6 +1,6 @@
 # Copyright 2026 The RLinf Authors.
 # SPDX-License-Identifier: Apache-2.0
-"""Small packaging checks; no Docker daemon or cluster required."""
+"""Source packaging and runtime checks without Docker or a cluster."""
 
 import importlib.util
 import json
@@ -12,7 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 
-REPO = Path(__file__).resolve().parents[2]
+REPO = Path(__file__).resolve().parents[3]
 SPEC = importlib.util.spec_from_file_location(
     "dreamdojo_container_context", REPO / "docker/dreamdojo/prepare_context.py"
 )

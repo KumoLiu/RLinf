@@ -1,6 +1,6 @@
 # Copyright 2026 The RLinf Authors.
 # SPDX-License-Identifier: Apache-2.0
-"""Check dry-run sweep manifests without Slurm, GPUs or filesystem outputs."""
+"""Generic experiment matrices, configuration isolation and submission guards."""
 
 import os
 import shlex
@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-REPO = Path(__file__).resolve().parents[2]
+REPO = Path(__file__).resolve().parents[3]
 SCRIPT = REPO / "docker/dreamdojo/submit_wm_comparison.sh"
 
 
@@ -180,16 +180,22 @@ def test_kir_ablation_changes_only_one_setting_and_names(
     }
 
 
-def test_overnight_kir_set_has_five_unique_new_names():
-    rows = manifest(KIR_ENABLED="true", SEED_IDS="1 2")
-    rows += manifest(KIR_ENABLED="true", KIR_PROBABILITY="1.0")
-    rows += manifest(KIR_ENABLED="true", KIR_MAX_OFFSET_FRAMES="15")
-    rows += manifest(KIR_ENABLED="true", TRAIN_WM_STEPS="15")
+def test_combined_sweep_variants_have_unique_names_and_fixed_eval():
+    rows = []
+    for steps in ("15", "35"):
+        common = {"SEED_IDS": "0 1 2", "TRAIN_WM_STEPS": steps}
+        rows += manifest(**common)
+        for probability, offset in (("0.5", "30"), ("1.0", "30"), ("0.5", "15")):
+            rows += manifest(
+                **common,
+                KIR_ENABLED="true",
+                KIR_PROBABILITY=probability,
+                KIR_MAX_OFFSET_FRAMES=offset,
+            )
     names = {row["runner.logger.experiment_name"] for row in rows}
-    assert len(rows) == len(names) == 5
-    assert manifest(KIR_ENABLED="true")[0]["runner.logger.experiment_name"] not in names
+    assert len(rows) == len(names) == 24
     for row in rows:
-        assert row["env.eval.enable_kir"] == "false"
+        assert row.get("env.eval.enable_kir", "false") == "false"
         assert row["env.eval.num_inference_steps"] == "35"
         assert row["env.eval.seed"] == "0"
         assert row["actor.optim.lr"] == "5e-6"

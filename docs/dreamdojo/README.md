@@ -205,6 +205,17 @@ Dockerfile构建镜像，`export_sqsh.sh`/`upload_sqsh.sh`负责导出与上传�
 [dreamdojo_validation.py](../../toolkits/world_model/dreamdojo_validation.py)，按parity → 真实动作WM → policy → reward顺序；
 5/15/35指WM去噪迭代数，不是生成视频长度。
 
+CPU回归统一在 [tests/unit_tests/dreamdojo/](../../tests/unit_tests/dreamdojo/)：
+`env`（动作桥/reward/KIR）、`eval`（评测/视频/诊断）、`inference`（推理/LAM）、
+`container`（打包/环境检查）、`chain`（续跑）、`sweep`（对比配置）六个测试文件。
+在RLinf根目录运行，不加载GPU模型或提交cluster作业：
+
+```bash
+CUDA_VISIBLE_DEVICES='' PYTHONPATH=. .venv/bin/python -m pytest \
+  --noconftest -p no:cacheprovider -c /dev/null -q tests/unit_tests/dreamdojo
+```
+
+
 当前仅保留220/SFT的独立eval视频，本地仅保留五组训练曲线，cluster训练日志仍保留。
 v3权重与标签保留，但其引用的130代原视频已按要求删除，不能完整复核或重建该部分视频输入。
 旧文档及详细清理记录已归档到 `/localhome/local-yunl/code_cleanup_archive/20260917_single_doc.nUd2Rn/`；

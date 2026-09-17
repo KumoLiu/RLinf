@@ -1,6 +1,6 @@
 # Copyright 2026 The RLinf Authors.
 # SPDX-License-Identifier: Apache-2.0
-"""CPU tests for boundary saves and Slurm handoff; no cluster or GPU required."""
+"""Checkpoint boundary saves and Slurm handoff without GPUs or a cluster."""
 
 import importlib.util
 import queue
@@ -14,7 +14,7 @@ import pytest
 
 from rlinf.utils.train_budget import TrainBudget, atomic_json
 
-REPO = Path(__file__).resolve().parents[2]
+REPO = Path(__file__).resolve().parents[3]
 SPEC = importlib.util.spec_from_file_location(
     "dreamdojo_chain", REPO / "docker/dreamdojo/chain.py"
 )
