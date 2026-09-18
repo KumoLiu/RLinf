@@ -16,14 +16,15 @@ export RLINF_CHAIN_SOURCE_ROOT="${BASE}/code/RLinf-runtime/20260911-chain-v1"
 export CHAIN_TIMEOUT=3.9h MAX_RUNS=18
 unset CHAIN_ID RUN_COUNT NCCL_P2P_LEVEL
 
-# Lists may be narrowed for follow-up controlled comparisons.
-read -r -a WMS <<< "${WM_VARIANTS:-r64 scratch_r32}"
-read -r -a NOISES <<< "${NOISE_LEVELS:-0.1 0.3 0.5}"
+# Default to the real-tested step-220 recipe; expand lists only for new studies.
+# Historical r64 runs require restoring the matching DreamDojo config first.
+read -r -a WMS <<< "${WM_VARIANTS:-scratch_r32}"
+read -r -a NOISES <<< "${NOISE_LEVELS:-0.3}"
 read -r -a BATCHES <<< "${GLOBAL_BATCH_SIZES:-128}"
 read -r -a LRS <<< "${ACTOR_LRS:-5e-6}"
 # Replicate 0 preserves the original actor=1234 / train-env=0 pairing.
 read -r -a SEEDS <<< "${SEED_IDS:-0}"
-TRAIN_WM_STEPS="${TRAIN_WM_STEPS:-35}"
+TRAIN_WM_STEPS="${TRAIN_WM_STEPS:-15}"
 KIR_ENABLED="${KIR_ENABLED:-false}"
 KIR_PROBABILITY="${KIR_PROBABILITY:-0.5}"
 KIR_MAX_OFFSET_FRAMES="${KIR_MAX_OFFSET_FRAMES:-30}"
@@ -34,7 +35,7 @@ if [[ "$KIR_ENABLED" == false && ( "$KIR_PROBABILITY" != 0.5 || "$KIR_MAX_OFFSET
     echo "Non-default KIR settings require KIR_ENABLED=true" >&2; exit 2;
 fi
 kir_suffix=""
-kir_args=()
+kir_args=(env.train.enable_kir=false env.eval.enable_kir=false)
 if [[ "$KIR_ENABLED" == true ]]; then
     kir_suffix="_kirhandp50"
     if [[ "$KIR_PROBABILITY" == 1.0 ]]; then kir_suffix="_kirhandp100"; fi
@@ -62,7 +63,7 @@ done
 [[ "$TRAIN_WM_STEPS" == 15 || "$TRAIN_WM_STEPS" == 35 ]] || { echo "Invalid train WM steps: $TRAIN_WM_STEPS" >&2; exit 2; }
 wm_suffix=""
 if [[ "$TRAIN_WM_STEPS" != 35 ]]; then wm_suffix="_wm${TRAIN_WM_STEPS}"; fi
-SWEEP_TAG="${SWEEP_TAG:-20260911_wm_noise}"
+SWEEP_TAG="${SWEEP_TAG:-best_scratch_wm15}"
 [[ "$SWEEP_TAG" =~ ^[A-Za-z0-9_-]+$ ]] || { echo "Invalid SWEEP_TAG" >&2; exit 2; }
 SUBMISSIONS="${RLINF_OUTPUTS:-${BASE}/outputs/rlinf}/sweeps/${SWEEP_TAG}"
 
@@ -77,7 +78,9 @@ if [[ "$MODE" == --submit ]]; then
         [[ -s "$path" ]] || { echo "Missing asset: $path" >&2; exit 1; }
     done
     [[ -d "$GR00T_MODEL_PATH" ]] || { echo "Missing SFT: $GR00T_MODEL_PATH" >&2; exit 1; }
-    for directory in lora_r32_lr3e-4_r64_18k lora_r32_scratch_lr3e-4_18k; do
+    for wm in "${WMS[@]}"; do
+        directory=lora_r32_scratch_lr3e-4_18k
+        if [[ "$wm" == r64 ]]; then directory=lora_r32_lr3e-4_r64_18k; fi
         [[ -s "${RLINF_CHECKPOINT_ROOT}/DreamDojo/${directory}/checkpoints/iter_000018000/model_ema_bf16.pt" ]] || {
             echo "Missing WM: $directory" >&2; exit 1;
         }
@@ -96,6 +99,7 @@ for wm in "${WMS[@]}"; do
         experiment=dreamdojo_2b_480_640_g1_hf_teleop_rollout_posttrain_lora
     fi
     export DREAMDOJO_WM_CHECKPOINT="${RLINF_CHECKPOINT_ROOT}/DreamDojo/${directory}/checkpoints/iter_000018000/model_ema_bf16.pt"
+    export DREAMDOJO_WM_EXPERIMENT="${experiment}"
     for noise in "${NOISES[@]}"; do
         for batch in "${BATCHES[@]}"; do
           for lr in "${LRS[@]}"; do

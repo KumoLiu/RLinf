@@ -17,9 +17,10 @@ hydra:
 cluster:
   num_nodes: 1
   component_placement:
-    # Local default excludes faulty physical GPU 4. Override for other hosts.
+    # Best-run recipe uses eight cluster GPUs. The local shell entry excludes
+    # faulty GPU 4 and adjusts env/global batch counts for seven ranks.
     # Native train/eval share the same devices; there is no separate eval pool.
-    actor,env,rollout: ${oc.env:DREAMDOJO_GPUS,'0-3,5-7'}
+    actor,env,rollout: ${oc.env:DREAMDOJO_GPUS,'0-7'}
 
 runner:
   task_type: embodied
@@ -63,8 +64,10 @@ algorithm:
 env:
   group_name: EnvGroup
   train:
-    rollout_epoch: 1
-    total_num_envs: 56
+    rollout_epoch: 2
+    total_num_envs: 64
+    num_inference_steps: 15
+    enable_kir: false
     group_size: ${algorithm.group_size}
     # 240 native 30-Hz commands = 8 seconds = 120 WM frames.
     max_episode_steps: 240
@@ -85,6 +88,8 @@ env:
   eval:
     rollout_epoch: 1
     total_num_envs: 56
+    num_inference_steps: 35
+    enable_kir: false
     group_size: 1
     max_episode_steps: 240
     max_steps_per_rollout_epoch: 240
@@ -92,7 +97,7 @@ env:
     ignore_terminations: true
     is_eval: true
     use_fixed_reset_state_ids: true
-    # 55 fixed dataset indices, plus one compute-only padding slot for 7 x 8.
+    # 55 fixed dataset indices, plus one compute-only padding slot.
     eval_unique_episodes: true
     enable_offload: true
     wm_offload_diffusion_model: false
@@ -127,8 +132,8 @@ rollout:
 actor:
   group_name: ActorGroup
   training_backend: fsdp
-  micro_batch_size: 2
-  global_batch_size: 56
+  micro_batch_size: 8
+  global_batch_size: 128
   seed: 1234
   enable_offload: true
   model:
@@ -143,8 +148,9 @@ actor:
     rl_head_config:
       # Flow-SDE provides exploration; no noise on physical targets.
       # Override noise_level for ablations; keep physical-target noise at zero.
-      noise_level: 0.1
+      noise_level: 0.3
       action_noise_scale: 0.0
+      noise_anneal: false
   optim:
     lr: 5.0e-6
     value_lr: 1.0e-4

@@ -15,5 +15,5 @@ set -euo pipefail
 # Slurm executes a spool copy: use the persistent checkout, not dirname "$0".
 export REPO_ROOT="${REPO_ROOT:-/lustre/fsw/portfolios/healthcareeng/users/yunl/code/RLinf}"
 export CHAIN_TIMEOUT="${CHAIN_TIMEOUT:-3.9h}"
-export MAX_RUNS="${MAX_RUNS:-6}"
+export MAX_RUNS="${MAX_RUNS:-18}"
 exec python3 "${REPO_ROOT}/docker/dreamdojo/chain.py" "$@"

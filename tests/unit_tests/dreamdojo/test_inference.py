@@ -113,8 +113,6 @@ def test_teacher_generation_cli_keeps_standard_arguments(monkeypatch):
             "teacher_generation",
             "--experiment",
             "g1",
-            "--dataset_path",
-            "/tmp/g1_dataset",
             "--start",
             "2",
             "--end",
@@ -122,7 +120,6 @@ def test_teacher_generation_cli_keeps_standard_arguments(monkeypatch):
         ],
     )
     args = namespace["parse_arguments"]()
-    assert args.dataset_path == "/tmp/g1_dataset"
     assert (args.start, args.end) == (2, 4)
     assert set(vars(args)) == {
         "experiment",
@@ -133,13 +130,67 @@ def test_teacher_generation_cli_keeps_standard_arguments(monkeypatch):
         "s3_cred",
         "input_video_root",
         "save_root",
-        "dataset_path",
         "start",
         "end",
         "num_latent_conditional_frames",
         "query_steps",
         "context_parallel_size",
     }
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_final_wm_loss_keeps_upstream_channel_consistency(dtype):
+    path = (
+        ROOT / "cosmos_predict2/_src/predict2/models/text2world_model_rectified_flow.py"
+    )
+    method = native_method(path, "Text2WorldModelRectifiedFlow", "forward")
+
+    def assigns(node, name):
+        return isinstance(node, ast.Assign) and any(
+            isinstance(target, ast.Name) and target.id == name
+            for target in node.targets
+        )
+
+    start = next(
+        i for i, node in enumerate(method.body) if assigns(node, "per_instance_loss")
+    )
+    end = next(i for i, node in enumerate(method.body) if assigns(node, "loss"))
+    generator = torch.Generator().manual_seed(31)
+    pred = torch.randn(
+        2, 4, 3, 2, 2, generator=generator, dtype=dtype, requires_grad=True
+    )
+    target = torch.randn(2, 4, 3, 2, 2, generator=generator, dtype=dtype)
+    weights = torch.tensor([0.5, 1.5], dtype=dtype)
+    namespace = {
+        "torch": torch,
+        "vt_pred_B_C_T_H_W": pred,
+        "vt_B_C_T_H_W": target,
+        "time_weights_B": weights,
+    }
+    exec(
+        compile(
+            ast.Module(body=method.body[start : end + 1], type_ignores=[]),
+            str(path),
+            "exec",
+        ),
+        namespace,
+    )
+    dims = (1, 2, 3, 4)
+    expected = (
+        weights
+        * (
+            ((pred - target) ** 2).mean(dims)
+            + 0.1
+            * ((torch.diff(pred, dim=1) - torch.diff(target, dim=1)) ** 2).mean(dims)
+        )
+    ).mean()
+    torch.testing.assert_close(namespace["loss"], expected, rtol=0, atol=0)
+    torch.testing.assert_close(
+        torch.autograd.grad(namespace["loss"], pred, retain_graph=True)[0],
+        torch.autograd.grad(expected, pred)[0],
+        rtol=0,
+        atol=0,
+    )
 
 
 @pytest.mark.parametrize("per_worker", [False, True])

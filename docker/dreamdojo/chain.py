@@ -95,7 +95,7 @@ def main(overrides: list[str]) -> int:
         raise ValueError("CHAIN_ID must be a simple directory name")
     run_count, max_runs = (
         int(environ.get("RUN_COUNT", 1)),
-        int(environ.get("MAX_RUNS", 6)),
+        int(environ.get("MAX_RUNS", 18)),
     )
     if not 1 <= run_count <= max_runs:
         raise ValueError("Require 1 <= RUN_COUNT <= MAX_RUNS")

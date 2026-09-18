@@ -75,7 +75,8 @@ DreamDojo从官方G1 post-train权重做LoRA适配，比较过LR、rank、batch�
 正式RL使用v2分类器，识别pick / handover / place，阈值均为0.8。
 pick/hand需15 tick中13次通过，place需2/2；每个新阶段奖励+1，总分最多3。
 历史奖励锁存、不因后续掉落撤销；15fps生成帧重复成30Hz输入，place两票可能来自同一帧。
-因此高奖励不能替代人工判断。v3仅完成AI稀疏标注及候选训练，未部署到RL。
+因此高奖励不能替代人工判断。v3曾做AI稀疏标注及候选训练，未证明解决误奖、未部署到RL；
+现仅保留正式v2代码，过程简述见[DreamDojo分类器说明](../../../DreamDojo/docs/TROCAR_PROJECT.md)。
 
 ### 3.3 RL对比实验
 
@@ -153,7 +154,7 @@ SSH：`nvidia-cluster`。根目录：`/lustre/fsw/portfolios/healthcareeng/users
 | 数据 / 输出 | `rlinf_assets/20260911/data` → 容器`/assets/data`；`outputs/rlinf` → `/outputs` |
 
 权重统一路径只读挂载，不为每个实验复制。环境变量见 [cluster.env.example](cluster.env.example)，
-它是cluster/container配置，不应直接用于本地训练；其中默认WM不等于最优scratch方案。
+它是cluster/container配置，不应直接用于本地训练；默认WM权重和experiment已成对设为scratch rank32。
 旧v1镜像仍需版本化LAM/chain及可选KIR/视频审计源码挂载，按原chain manifest选择；
 不能覆盖原快照或叠加不兼容快照。GR00T的RL head/Flow-SDE实现仍在RLinf，不随上游包自动更新。
 
@@ -162,15 +163,19 @@ SSH：`nvidia-cluster`。根目录：`/lustre/fsw/portfolios/healthcareeng/users
 最优配方的提交预览（在cluster RLinf根目录运行，不提交作业）：
 
 ```bash
-WM_VARIANTS=scratch_r32 NOISE_LEVELS=0.3 GLOBAL_BATCH_SIZES=128 \
-ACTOR_LRS=5e-6 SEED_IDS=0 TRAIN_WM_STEPS=15 KIR_ENABLED=false \
 SWEEP_TAG=my_new_run \
 bash docker/dreamdojo/submit_wm_comparison.sh --dry-run
 ```
 
 确认后用新的唯一`SWEEP_TAG`，将`--dry-run`改成`--submit`。
 `SEED_IDS=0/1/2`对应actor1234/1235/1236；脚本成对选择WM权重与匹配rank的experiment。
-不指定上述覆盖值时默认不一定是最优配方，尤其train WM默认35步。
+默认只产生最优配方这一组：scratch_r32、noise0.3、gb128/micro8、LR5e-6、
+actor seed1234/env seed0、train15/eval35、KIR关闭；不是自动提交旧六组消融。
+需要新对照时显式设置`WM_VARIANTS`、`NOISE_LEVELS`、`GLOBAL_BATCH_SIZES`、
+`ACTOR_LRS`、`SEED_IDS`、`TRAIN_WM_STEPS`。r64配置已从DreamDojo精简，复用前先恢复匹配配置。
+入口仍从SFT初始化，**不会默认加载第220代policy或恢复历史训练**。
+上述是本地源码默认值；本次未同步cluster、改旧快照或重建SQSH。
+更新后的`run_cluster.slurm`会显式传入配方，避免旧v1镜像中的YAML把默认值改回去。
 
 独立eval仍用原生 `evaluations/eval_embodied_agent.py`，cluster包装为
 `docker/dreamdojo/run_cluster.slurm eval`。指定 `runner.ckpt_path=<full_weights.pt>`；
@@ -201,7 +206,11 @@ Dockerfile构建镜像，`export_sqsh.sh`/`upload_sqsh.sh`负责导出与上传�
 
 本地入口：[run_dreamdojo_trocar.sh](../../examples/embodiment/run_dreamdojo_trocar.sh)；
 配置：[YAML](../../examples/embodiment/config/dreamdojo_trocar_grpo_gr00t_n1d7.yaml)。
-先加`--cfg job --resolve`查看配置。定位问题用
+先加`--cfg job --resolve`查看配置。主YAML为8卡、64 env×2、global batch128；
+本机使用shell入口仍避开故障GPU4，保留7卡，对应56 env×2、global batch112/micro8，
+每代112条轨迹、20次更新。7不能整除128，因此本地只是硬件适配，不是完全相同的8卡复现；
+严格复现用cluster的8卡设置。显式CLI覆盖最后生效；不要在本机直接使用未适配的8卡YAML启动。
+定位问题用
 [dreamdojo_validation.py](../../toolkits/world_model/dreamdojo_validation.py)，按parity → 真实动作WM → policy → reward顺序；
 5/15/35指WM去噪迭代数，不是生成视频长度。
 
@@ -217,6 +226,9 @@ CUDA_VISIBLE_DEVICES='' PYTHONPATH=. .venv/bin/python -m pytest \
 
 
 当前仅保留220/SFT的独立eval视频，本地仅保留五组训练曲线，cluster训练日志仍保留。
-v3权重与标签保留，但其引用的130代原视频已按要求删除，不能完整复核或重建该部分视频输入。
+DreamDojo当前仅保留v2分类器；v0/v1/v3产物和旧代码已归档到仓库外，可从
+`/localhome/local-yunl/code_cleanup_archive/20260917_best_defaults_classifier.jp3dxhnS/`恢复。
+其中130代原视频此前已删除，归档不能恢复这些视频；v2使用的`reviewed_labels_v3.json`仍保留，
+文件中的v3是标签修订号，与被移除的四头v3模型无关。
 旧文档及详细清理记录已归档到 `/localhome/local-yunl/code_cleanup_archive/20260917_single_doc.nUd2Rn/`；
-已删除的模型/视频没有备份，不能从文档归档恢复。本次仅整理文档，不修改训练代码或数据。
+此前直接删除的RL模型/视频没有备份，不能从文档归档恢复。本次不启动训练、不修改数据或正式权重。

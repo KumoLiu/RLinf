@@ -278,7 +278,33 @@ def test_slurm_uses_shared_checkpoints_readonly_without_copying(tmp_path):
     assert "P2P_DISABLE=0\0" in result.stdout
     forwarded = next(x for x in args if x.startswith("--container-env="))
     assert "DREAMDOJO_LAM_CHECKPOINT" in forwarded
+    assert "DREAMDOJO_WM_EXPERIMENT" in forwarded
     assert "NCCL_P2P_DISABLE" in forwarded
+    # Inspect only recipe construction; never run the container/GPU commands.
+    inner = args[args.index("-c") + 1]
+    prefix = inner.split('        echo "NCCL_P2P_DISABLE=')[0]
+    recipe_env = {
+        **env,
+        "DREAMDOJO_WM_EXPERIMENT": "dreamdojo_2b_480_640_g1_hf_teleop_rollout_posttrain_lora",
+    }
+    built = subprocess.run(
+        ["bash", "-c", prefix + '\nprintf "%s\\0" "${recipe[@]}"\n'],
+        env=recipe_env,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    recipe = dict(x.split("=", 1) for x in built.stdout.rstrip("\0").split("\0"))
+    assert recipe["env.train.num_inference_steps"] == "15"
+    assert recipe["env.eval.num_inference_steps"] == "35"
+    assert recipe["actor.global_batch_size"] == "128"
+    assert recipe["actor.micro_batch_size"] == "8"
+    assert recipe["actor.model.rl_head_config.noise_level"] == "0.3"
+    assert (
+        recipe["++env.train.enable_kir"] == recipe["++env.eval.enable_kir"] == "false"
+    )
+    assert recipe["env.train.experiment_name"] == recipe["env.eval.experiment_name"]
+    assert '"${recipe[@]}" "$@"' in inner
     assert not (base / "rlinf_assets/20260911/models").exists()
     env["DREAMDOJO_WM_CHECKPOINT"] = str(checkpoint_root / "missing.pt")
     missing = subprocess.run(

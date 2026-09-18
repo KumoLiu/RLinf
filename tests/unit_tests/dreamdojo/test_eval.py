@@ -46,13 +46,15 @@ def fake_env(rank, count=55, workers=7, per_worker=8):
     return env
 
 
-def test_local_recipe_preserves_native_train_eval_defaults():
+def test_recipe_preserves_native_train_eval_defaults():
     cfg = config()
-    assert cfg.cluster.component_placement["actor,env,rollout"] == "0-3,5-7"
+    assert cfg.cluster.component_placement["actor,env,rollout"] == "0-7"
     assert cfg.runner.max_epochs == 1000 and cfg.runner.max_steps == -1
     assert cfg.runner.val_check_interval == cfg.runner.save_interval == 5
-    assert cfg.env.train.total_num_envs == cfg.actor.global_batch_size == 56
-    assert cfg.actor.micro_batch_size == 2
+    assert cfg.env.train.total_num_envs == 64
+    assert cfg.env.train.rollout_epoch == 2
+    assert cfg.actor.global_batch_size == 128
+    assert cfg.actor.micro_batch_size == 8
     assert cfg.env.eval.total_num_envs == 56
     assert cfg.env.eval.group_size == 1
     assert cfg.env.eval.eval_unique_episodes
@@ -60,8 +62,8 @@ def test_local_recipe_preserves_native_train_eval_defaults():
     assert cfg.env.eval.ignore_terminations and not cfg.env.eval.auto_reset
     assert cfg.env.eval.initial_image_mixing_weights is None
     assert not cfg.env.train.eval_unique_episodes
-    for part in (cfg.env.train, cfg.env.eval):
-        assert part.num_inference_steps == 35
+    for part, steps in ((cfg.env.train, 15), (cfg.env.eval, 35)):
+        assert part.num_inference_steps == steps
         assert part.video_cfg.fps == 15
         assert part.enable_offload
         assert part.cache_text_embeddings and part.skip_zero_guidance
@@ -83,11 +85,11 @@ def test_seven_shards_cover_each_validation_episode_once():
     assert padding == [0]
 
 
-def test_local_recipe_preserves_flow_sde_and_video_settings():
+def test_recipe_preserves_flow_sde_and_video_settings():
     cfg = config()
     head = cfg.actor.model.rl_head_config
     assert head.noise_method == "flow_sde"
-    assert head.noise_level == pytest.approx(0.1)
+    assert head.noise_level == pytest.approx(0.3)
     assert not head.noise_anneal
     assert head.action_noise_scale == 0
     assert cfg.actor.model.denoising_steps == 4

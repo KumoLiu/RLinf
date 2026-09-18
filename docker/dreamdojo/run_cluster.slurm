@@ -23,7 +23,8 @@ HF_CACHE="${HF_CACHE_ROOT:-${BASE}/cache/huggingface}"
 # These are host paths, mounted read-only at the SAME paths inside the container.
 # Never copy existing checkpoints into an experiment-specific assets directory.
 export GR00T_MODEL_PATH="${GR00T_MODEL_PATH:-${CHECKPOINTS}/gr00t_ft/g1_pick_trocar_head_10k_bs32_lr1e-4/976127}"
-export DREAMDOJO_WM_CHECKPOINT="${DREAMDOJO_WM_CHECKPOINT:-${CHECKPOINTS}/DreamDojo/lora_r32_lr3e-4_r64_18k/checkpoints/iter_000018000/model_ema_bf16.pt}"
+export DREAMDOJO_WM_CHECKPOINT="${DREAMDOJO_WM_CHECKPOINT:-${CHECKPOINTS}/DreamDojo/lora_r32_scratch_lr3e-4_18k/checkpoints/iter_000018000/model_ema_bf16.pt}"
+export DREAMDOJO_WM_EXPERIMENT="${DREAMDOJO_WM_EXPERIMENT:-dreamdojo_2b_480_640_g1_hf_teleop_rollout_posttrain_lora}"
 export DREAMDOJO_REWARD_CHECKPOINT="${DREAMDOJO_REWARD_CHECKPOINT:-${CHECKPOINTS}/reward/milestone_v2/best.pt}"
 export DREAMDOJO_LAM_CHECKPOINT="${DREAMDOJO_LAM_CHECKPOINT:-${CHECKPOINTS}/DreamDojo/LAM_400k.ckpt}"
 [[ -f "${IMAGE}" ]] || { echo "Missing image: ${IMAGE}" >&2; exit 1; }
@@ -116,7 +117,7 @@ export DREAMDOJO_GPUS="${DREAMDOJO_GPUS:-0-7}"
 # Explicit 0 also prevents the v1 image's local train wrapper falling back to 1.
 # Do not restrict NCCL_P2P_LEVEL: let NCCL select the cluster's normal transport.
 export NCCL_P2P_DISABLE="${NCCL_P2P_DISABLE:-0}"
-CONTAINER_ENV="RLINF_RUN_MODE,RLINF_RUN_LOG,RLINF_PYTHON,DREAMDOJO_DATA_ROOT,GR00T_MODEL_PATH,DREAMDOJO_WM_CHECKPOINT,DREAMDOJO_REWARD_CHECKPOINT,DREAMDOJO_LAM_CHECKPOINT,HF_HOME,DREAMDOJO_GPUS,NCCL_P2P_DISABLE"
+CONTAINER_ENV="RLINF_RUN_MODE,RLINF_RUN_LOG,RLINF_PYTHON,DREAMDOJO_DATA_ROOT,GR00T_MODEL_PATH,DREAMDOJO_WM_CHECKPOINT,DREAMDOJO_WM_EXPERIMENT,DREAMDOJO_REWARD_CHECKPOINT,DREAMDOJO_LAM_CHECKPOINT,HF_HOME,DREAMDOJO_GPUS,NCCL_P2P_DISABLE"
 if [[ -n "${RLINF_TRAIN_DEADLINE:-}" ]]; then
     [[ "${MODE}" == train ]] || { echo "Chaining is train-only" >&2; exit 2; }
     CONTAINER_ENV+=",RLINF_TRAIN_DEADLINE,RLINF_CHAIN_DIR,RLINF_CHAIN_JOB_ID,RLINF_CHAIN_STEP_SECONDS,RLINF_CHAIN_EVAL_SECONDS,RLINF_CHAIN_SAVE_SECONDS"
@@ -130,6 +131,22 @@ srun --container-image="${IMAGE}" --container-mounts="${MOUNTS}" \
         export PYTHONPATH=/opt/src/RLinf:/opt/src/DreamDojo
         export DREAMDOJO_ROOT=/opt/src/DreamDojo
         export EMBODIED_PATH=/opt/src/RLinf/examples/embodiment
+        # Explicit defaults also work with v1 images containing the old YAML.
+        # User overrides are appended last in both native entry points.
+        recipe=(
+            "env.train.experiment_name=$DREAMDOJO_WM_EXPERIMENT"
+            "env.eval.experiment_name=$DREAMDOJO_WM_EXPERIMENT"
+            env.train.total_num_envs=64 env.train.rollout_epoch=2
+            env.train.num_inference_steps=15 env.eval.num_inference_steps=35
+            env.eval.total_num_envs=56 env.eval.eval_unique_episodes=true
+            ++env.train.enable_kir=false ++env.eval.enable_kir=false
+            actor.global_batch_size=128 actor.micro_batch_size=8 actor.seed=1234
+            env.train.seed=0 env.eval.seed=0 actor.optim.lr=5e-6
+            actor.model.rl_head_config.noise_level=0.3
+            actor.model.rl_head_config.action_noise_scale=0.0
+            actor.model.rl_head_config.noise_anneal=false
+            runner.max_epochs=1000 runner.val_check_interval=5 runner.save_interval=5
+        )
         echo "NCCL_P2P_DISABLE=$NCCL_P2P_DISABLE NCCL_P2P_LEVEL=${NCCL_P2P_LEVEL:-unset}"
         if [[ "$RLINF_RUN_MODE" != smoke ]]; then
             # Require the strict loader, not an older supplement that skips LAM.
@@ -149,7 +166,7 @@ srun --container-image="${IMAGE}" --container-mounts="${MOUNTS}" \
                     --config-path /opt/src/RLinf/examples/embodiment/config \
                     --config-name dreamdojo_trocar_grpo_gr00t_n1d7 \
                     runner.only_eval=true "rollout.model=\${actor.model}" \
-                    "runner.logger.log_path=$RLINF_RUN_LOG" "$@"
+                    "runner.logger.log_path=$RLINF_RUN_LOG" "${recipe[@]}" "$@"
                 ;;
             kir-check)
                 exec /opt/venv/bin/python toolkits/world_model/dreamdojo_validation.py kir \
@@ -158,7 +175,7 @@ srun --container-image="${IMAGE}" --container-mounts="${MOUNTS}" \
             train)
                 exec bash examples/embodiment/run_dreamdojo_trocar.sh \
                     "runner.logger.log_path=$RLINF_RUN_LOG" \
-                    env.train.total_num_envs=64 actor.global_batch_size=64 "$@"
+                    "${recipe[@]}" "$@"
                 ;;
             *) echo "Unknown mode: $RLINF_RUN_MODE" >&2; exit 2 ;;
         esac

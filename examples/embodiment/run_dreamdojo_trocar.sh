@@ -18,7 +18,15 @@ fi
 export DREAMDOJO_ROOT="${DREAMDOJO_ROOT:-${WORKSPACE_ROOT}/DreamDojo}"
 export DREAMDOJO_DATA_ROOT="${DREAMDOJO_DATA_ROOT:-${WORKSPACE_ROOT}/data}"
 export GR00T_MODEL_PATH="${GR00T_MODEL_PATH:-${WORKSPACE_ROOT}/models/s2r_models_dev/yunl/sft/g1/pick_trocar/g1_pick_trocar_head_10k_bs32_lr1e-4}"
-export DREAMDOJO_WM_CHECKPOINT="${DREAMDOJO_WM_CHECKPOINT:-${WORKSPACE_ROOT}/models/dreamdojo/lora_r32_lr3e-4_r64_18k/checkpoints/iter_000018000/model_ema_bf16.pt}"
+export DREAMDOJO_WM_CHECKPOINT="${DREAMDOJO_WM_CHECKPOINT:-${WORKSPACE_ROOT}/models/dreamdojo/lora_r32_scratch_lr3e-4_18k/checkpoints/iter_000018000/model_ema_bf16.pt}"
+export DREAMDOJO_GPUS="${DREAMDOJO_GPUS:-0-3,5-7}"
+# Seven local ranks cannot divide global batch 128. Preserve eight envs/rank,
+# two rollout epochs and two accumulation rounds: 112 trajectories, 20 updates.
+# Explicit CLI arguments below still take precedence; cluster uses 0-7.
+site_args=()
+if [[ "${DREAMDOJO_GPUS}" == "0-3,5-7" ]]; then
+    site_args=(env.train.total_num_envs=56 actor.global_batch_size=112)
+fi
 
 # NCCL P2P hangs on the current H200 NVL host. Shared-memory transport passed
 # the previously validated collective/GRPO checks. GPU placement is in YAML.
@@ -58,4 +66,4 @@ export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH:-}"
 # Standard RLinf runner: no external eval supervisor or YAML overlay.
 cd "${REPO_ROOT}"
 exec "${PYTHON_BIN}" -u "${SCRIPT_DIR}/train_embodied_agent.py" \
-    --config-name dreamdojo_trocar_grpo_gr00t_n1d7 "$@"
+    --config-name dreamdojo_trocar_grpo_gr00t_n1d7 "${site_args[@]}" "$@"
