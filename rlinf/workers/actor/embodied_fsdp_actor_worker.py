@@ -35,6 +35,7 @@ from rlinf.utils.metric_utils import (
     CRITIC_EXPLAINED_VARIANCE_KEY,
     append_to_dict,
     compute_critic_explained_variance_from_stats,
+    compute_group_reward_metrics,
     compute_loss_mask,
     compute_rollout_metrics,
     compute_split_num,
@@ -318,6 +319,16 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
             self.rollout_batch.update({"loss_mask_sum": kwargs["loss_mask_sum"]})
 
         rollout_metrics = compute_rollout_metrics(self.rollout_batch)
+        if self.cfg.algorithm.get("log_group_reward_stats", False):
+            from rlinf.algorithms.utils import (
+                calculate_scores,
+                preprocess_embodied_advantages_inputs,
+            )
+
+            if kwargs["adv_type"] != "grpo":
+                raise ValueError("Group reward diagnostics require GRPO")
+            scores = calculate_scores(**preprocess_embodied_advantages_inputs(**kwargs))
+            rollout_metrics.update(compute_group_reward_metrics(scores["rewards"]))
         return rollout_metrics
 
     @Worker.timer("actor/compute_opd_teacher_logprobs")

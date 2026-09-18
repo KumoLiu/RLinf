@@ -31,6 +31,7 @@ from rlinf.utils.metric_logger import MetricLogger
 from rlinf.utils.metric_utils import compute_evaluate_metrics, print_metrics_table
 from rlinf.utils.runner_utils import check_progress
 from rlinf.utils.timers import Timer
+from rlinf.utils.train_budget import TrainBudget
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +76,17 @@ class EmbodiedRunner:
         self.overlap_env_bootstrap = bool(
             self.cfg.runner.get("overlap_env_bootstrap", False)
         )
+        self.train_budget = TrainBudget.from_env()
+        if self.train_budget is not None and (
+            self.cfg.runner.get("use_training_pipeline", False)
+            or self.overlap_env_bootstrap
+            or self.weight_sync_interval != 1
+            or self.cfg.actor.training_backend != "fsdp"
+        ):
+            raise ValueError(
+                "Wall-clock chaining requires synchronous FSDP training, "
+                "weight_sync_interval=1 and no bootstrap prefetch"
+            )
 
         # Step-gated profiling: ``cluster.profiling.steps`` lists the global step
         profiling_raw = self.cfg.cluster.get("profiling", None)
@@ -130,8 +142,10 @@ class EmbodiedRunner:
             try:
                 # Wait for log message with timeout
                 log_func, args = self.log_queue.get(timeout=0.1)
-                log_func(*args)
-                self.log_queue.task_done()
+                try:
+                    log_func(*args)
+                finally:
+                    self.log_queue.task_done()
             except queue.Empty:
                 continue
             except Exception as e:
@@ -318,11 +332,14 @@ class EmbodiedRunner:
 
         eval_metrics = {}
         if run_val:
+            eval_start = time.monotonic()
             with self.timer("eval"):
                 self.update_rollout_weights()
                 eval_metrics = self.evaluate()
                 eval_metrics = {f"eval/{k}": v for k, v in eval_metrics.items()}
                 self.metric_logger.log(data=eval_metrics, step=step)
+            if self.train_budget is not None:
+                self.train_budget.observe("eval", time.monotonic() - eval_start)
 
         if save_model:
             self._save_checkpoint()
@@ -450,12 +467,11 @@ class EmbodiedRunner:
         )
 
     def _finish_run(self) -> None:
-        self.metric_logger.finish()
-
-        # Stop logging thread
+        # Drain before stopping: a pending queue item must not strand join().
+        self.log_queue.join()
         self.stop_logging = True
-        self.log_queue.join()  # Wait for all queued logs to be processed
         self.log_thread.join(timeout=1.0)
+        self.metric_logger.finish()
 
     def _should_profile_step(self, step_idx: int) -> bool:
         return self._profile_all_steps or (
@@ -482,7 +498,27 @@ class EmbodiedRunner:
 
         start_step = self.global_step
         start_time = time.time()
+        budget_stopped = False
         for _step in range(start_step, self.max_steps):
+            if self.train_budget is not None and self.train_budget.should_stop(
+                self.global_step + 1, self.max_steps, self.cfg.runner.val_check_interval
+            ):
+                if self.global_step == start_step:
+                    raise RuntimeError(
+                        "Chain budget cannot fit one iteration after initialization; "
+                        "increase CHAIN_TIMEOUT or review the time estimates"
+                    )
+                self.logger.info(
+                    f"Chain budget: saving and handing off at step {self.global_step}"
+                )
+                if (
+                    self.train_budget.latest is None
+                    or self.train_budget.latest["global_step"] != self.global_step
+                ):
+                    self._save_checkpoint()
+                budget_stopped = True
+                break
+            iteration_start = time.monotonic()
             # set global step
             self.actor.set_global_step(self.global_step).wait()
             self.rollout.set_global_step(self.global_step).wait()
@@ -543,6 +579,10 @@ class EmbodiedRunner:
                         env_bootstrap_handle.wait()
 
                 self.global_step += 1
+                if self.train_budget is not None:
+                    self.train_budget.observe(
+                        "step", time.monotonic() - iteration_start
+                    )
                 eval_metrics = self._maybe_eval_and_checkpoint(_step)
 
             if profiled_step is not None:
@@ -561,7 +601,16 @@ class EmbodiedRunner:
                 eval_metrics=eval_metrics,
             )
 
+        if self.train_budget is not None and not budget_stopped:
+            # A chain's final state is resumable even if periodic saving is disabled.
+            if (
+                self.train_budget.latest is None
+                or self.train_budget.latest["global_step"] != self.global_step
+            ):
+                self._save_checkpoint()
         self._finish_run()
+        if self.train_budget is not None:
+            self.train_budget.finish(self.global_step, self.max_steps, budget_stopped)
 
     def run_pipeline(self):
         start_step = self.global_step
@@ -643,6 +692,7 @@ class EmbodiedRunner:
         self._finish_run()
 
     def _save_checkpoint(self):
+        save_start = time.monotonic()
         self.logger.info(f"Saving checkpoint at step {self.global_step}.")
         base_output_dir = os.path.join(
             self.cfg.runner.logger.log_path,
@@ -652,6 +702,9 @@ class EmbodiedRunner:
         actor_save_path = os.path.join(base_output_dir, "actor")
         os.makedirs(actor_save_path, exist_ok=True)
         self.actor.save_checkpoint(actor_save_path, self.global_step).wait()
+        if self.train_budget is not None:
+            self.train_budget.observe("save", time.monotonic() - save_start)
+            self.train_budget.saved(base_output_dir, self.global_step, self.max_steps)
 
     def set_max_steps(self):
         self.num_steps_per_epoch = 1

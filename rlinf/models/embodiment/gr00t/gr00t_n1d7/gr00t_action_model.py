@@ -1096,7 +1096,10 @@ class GR00T_N1_7_ForRLActionPrediction(Gr00tN1d7, BasePolicy):
         is_numpy = isinstance(raw_action, np.ndarray)
         raw_tensor = torch.from_numpy(raw_action) if is_numpy else raw_action
         noise = torch.randn_like(raw_tensor) * noise_scale
-        raw_tensor = (raw_tensor + noise).clamp(-1.0, 1.0)
+        raw_tensor = raw_tensor + noise
+        # G1 actions are decoded physical joint targets, not normalized values.
+        if self.obs_converter_type != "g1_dex3_wm":
+            raw_tensor = raw_tensor.clamp(-1.0, 1.0)
         return raw_tensor.numpy() if is_numpy else raw_tensor
 
     def apply_transforms(self, obs: dict) -> dict:
@@ -1142,7 +1145,10 @@ class GR00T_N1_7_ForRLActionPrediction(Gr00tN1d7, BasePolicy):
         backbone_inputs, action_inputs = self.prepare_input(normalized_input)
         backbone_outputs = self.backbone(backbone_inputs)
         action_head_outputs, rlinf_outputs = self.action_head.get_rl_action(
-            backbone_outputs, action_inputs, mode=mode
+            backbone_outputs,
+            action_inputs,
+            mode=mode,
+            compute_values=self.action_head.rl_config.get("add_value_head", False),
         )
         actions = rlinf_outputs["actions"]
         if hasattr(self, "validate_data"):
