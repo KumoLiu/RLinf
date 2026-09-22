@@ -132,10 +132,12 @@ does not need a new core environment type.
 
 ``SubProcIsaacLabEnv`` accepts the existing ``(env, SimulationApp)`` factory or
 a bare environment for headless backends. Existing constructor and reset calls
-remain valid. Optional keyword arguments ``timeout_s`` and ``log_path`` provide
-bounded requests and child logs; ``reset(options=...)`` forwards task reset
-options. Child exceptions and exits propagate to the caller. No fake
-``SimulationApp`` is required, and actual physical factories still own their app.
+remain valid; ``reset(options=...)`` forwards task reset options. Child errors
+and exits are reported when requesting a result. No fake ``SimulationApp`` is
+required, and physical factories still own their app. Inference has no request
+deadline, and child output uses inherited stdout/stderr. The unreleased
+``timeout_s`` and ``log_path`` arguments have been removed; use
+``SubProcIsaacLabEnv(env_fn)``.
 
 For GR00T N1.7 policies that decode physical joint targets, set
 ``actor.model.rl_head_config.action_noise_clip: null`` to disable normalized
