@@ -137,6 +137,13 @@ class RecordVideo(gym.Wrapper):
             if len(obs) == 0:
                 return []
             if isinstance(obs[0], dict):
+                if len(obs) == 1:
+                    image_src = self._get_image_from_dict(obs[0])
+                    return (
+                        self._split_image_source(image_src)
+                        if image_src is not None
+                        else []
+                    )
                 frames = []
                 for item in obs:
                     image_src = self._get_image_from_dict(item)

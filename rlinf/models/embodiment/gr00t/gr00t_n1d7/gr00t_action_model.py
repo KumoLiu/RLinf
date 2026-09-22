@@ -123,6 +123,7 @@ _FORWARD_INPUT_MODEL_KEYS = {
     "embodiment_id",
     "input_ids",
     "attention_mask",
+    "mm_token_type_ids",
     "pixel_values",
     "image_grid_thw",
     "image_sizes",
@@ -155,10 +156,10 @@ def _canonicalize_gr00t_text_forward_inputs(
     forward_inputs: dict[str, Any],
     padding_value: int,
 ) -> dict[str, Any]:
-    """Right-pad ``input_ids`` and ``attention_mask`` to ``padding_value``."""
+    """Right-pad token IDs, attention and optional multimodal types together."""
     canonicalized = dict(forward_inputs)
 
-    for key in ("input_ids", "attention_mask"):
+    for key in ("input_ids", "attention_mask", "mm_token_type_ids"):
         tensor = canonicalized.get(key)
         if tensor is None:
             continue
@@ -1085,7 +1086,7 @@ class GR00T_N1_7_ForRLActionPrediction(Gr00tN1d7, BasePolicy):
         raw_action: np.ndarray | torch.Tensor,
         mode: Literal["train", "eval"],
     ) -> np.ndarray | torch.Tensor:
-        """Optionally perturb actions with clipped Gaussian noise during training."""
+        """Add training noise; set action_noise_clip=None for physical targets."""
         if mode != "train":
             return raw_action
 
@@ -1096,7 +1097,13 @@ class GR00T_N1_7_ForRLActionPrediction(Gr00tN1d7, BasePolicy):
         is_numpy = isinstance(raw_action, np.ndarray)
         raw_tensor = torch.from_numpy(raw_action) if is_numpy else raw_action
         noise = torch.randn_like(raw_tensor) * noise_scale
-        raw_tensor = (raw_tensor + noise).clamp(-1.0, 1.0)
+        raw_tensor = raw_tensor + noise
+        # Preserve normalized-action defaults without clipping physical joint targets.
+        clip = self.action_head.rl_config.get("action_noise_clip", 1.0)
+        if clip is not None:
+            if float(clip) <= 0:
+                raise ValueError("action_noise_clip must be positive or None")
+            raw_tensor = raw_tensor.clamp(-float(clip), float(clip))
         return raw_tensor.numpy() if is_numpy else raw_tensor
 
     def apply_transforms(self, obs: dict) -> dict:
@@ -1142,7 +1149,10 @@ class GR00T_N1_7_ForRLActionPrediction(Gr00tN1d7, BasePolicy):
         backbone_inputs, action_inputs = self.prepare_input(normalized_input)
         backbone_outputs = self.backbone(backbone_inputs)
         action_head_outputs, rlinf_outputs = self.action_head.get_rl_action(
-            backbone_outputs, action_inputs, mode=mode
+            backbone_outputs,
+            action_inputs,
+            mode=mode,
+            compute_values=self.action_head.rl_config.get("add_value_head", False),
         )
         actions = rlinf_outputs["actions"]
         if hasattr(self, "validate_data"):

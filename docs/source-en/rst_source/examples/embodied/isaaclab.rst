@@ -122,6 +122,29 @@ Install the environment for the model you want to run:
    # bash requirements/install.sh embodied --model openpi --env isaaclab
    # source .venv/bin/activate
 
+External Isaac Lab backends
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Custom tasks can register environment adapters in ``REGISTER_ISAACLAB_ENVS``
+through an ``RLINF_EXT_MODULE`` module exposing ``register()``. Use
+``env_type: isaaclab`` and the registered ``init_params.id``; the task backend
+does not need a new core environment type.
+
+``SubProcIsaacLabEnv`` accepts the existing ``(env, SimulationApp)`` factory or
+a bare environment for headless backends. Existing constructor and reset calls
+remain valid. Optional keyword arguments ``timeout_s`` and ``log_path`` provide
+bounded requests and child logs; ``reset(options=...)`` forwards task reset
+options. Child exceptions and exits propagate to the caller. No fake
+``SimulationApp`` is required, and actual physical factories still own their app.
+
+For GR00T N1.7 policies that decode physical joint targets, set
+``actor.model.rl_head_config.action_noise_clip: null`` to disable normalized
+action clipping after exploration noise. The default remains ``1.0`` (clip to
+[-1, 1]); zero action-noise scale and evaluation do not perturb or clip actions.
+Optional multimodal token-type inputs are retained for newer processors, and
+GRPO can run without a value head. These interface changes do not provide
+model weights or validate a particular external neural simulator.
+
 Download Isaac Sim
 ~~~~~~~~~~~~~~~~~~
 
