@@ -12,7 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import traceback
 from multiprocessing.connection import Connection
+from queue import Empty
 
 import torch
 import torch.multiprocessing as mp
@@ -29,49 +31,56 @@ def _torch_worker(
     reset_idx_queue: mp.Queue,
 ):
     parent_remote.close()
-    env_fn = env_fn_wrapper.x
-    isaac_env, sim_app = env_fn()
-    device = isaac_env.device
+    isaac_env = sim_app = None
     try:
+        created = env_fn_wrapper.x()
+        # Kit factories return (env, app); native backends return only env.
+        isaac_env, sim_app = created if isinstance(created, tuple) else (created, None)
+        device = isaac_env.device
         while True:
-            try:
-                cmd = child_remote.recv()
-            except EOFError:
-                child_remote.close()
-                break
+            cmd = child_remote.recv()
             if cmd == "reset":
-                reset_index, reset_seed = reset_idx_queue.get()
-                if reset_index is None:
-                    reset_result = isaac_env.reset(seed=reset_seed)
-                else:
-                    reset_result = isaac_env.reset(
-                        seed=reset_seed, env_ids=reset_index.to(device)
-                    )
+                reset_index, reset_seed, options = reset_idx_queue.get()
+                kwargs = {"seed": reset_seed}
+                if reset_index is not None:
+                    kwargs["env_ids"] = reset_index.to(device)
+                if options is not None:
+                    kwargs["options"] = options
+                reset_result = isaac_env.reset(**kwargs)
                 obs_queue.put(reset_result)
             elif cmd == "step":
                 input_action = action_queue.get()
                 step_result = isaac_env.step(input_action)
                 obs_queue.put(step_result)
             elif cmd == "close":
-                isaac_env.close()
-                child_remote.close()
-                sim_app.close()
                 break
             elif cmd == "device":
-                child_remote.send(isaac_env.device)
+                obs_queue.put(device)
             else:
-                child_remote.close()
-                raise NotImplementedError
-    except KeyboardInterrupt:
-        child_remote.close()
+                raise NotImplementedError(f"Unknown environment command: {cmd}")
+    except (KeyboardInterrupt, EOFError):
+        pass
+    except Exception:
+        obs_queue.put(
+            RuntimeError(
+                f"IsaacLab environment subprocess failed:\n{traceback.format_exc()}"
+            )
+        )
     finally:
         try:
-            isaac_env.close()
-        except Exception as e:
-            print(f"IsaacLab Env Closed with error: {e}")
+            if isaac_env is not None:
+                isaac_env.close()
+        finally:
+            try:
+                if sim_app is not None:
+                    sim_app.close()
+            finally:
+                child_remote.close()
 
 
 class SubProcIsaacLabEnv:
+    """Run an (env, app) factory or an app-free native environment in a subprocess."""
+
     def __init__(self, env_fn):
         mp.set_start_method("spawn", force=True)
         ctx = mp.get_context("spawn")
@@ -93,26 +102,63 @@ class SubProcIsaacLabEnv:
         self.isaac_lab_process.start()
         self.child_remote.close()
 
-    def reset(self, seed=None, env_ids=None):
+    def _receive(self):
+        """Surface child errors/exits without imposing an inference deadline."""
+        while True:
+            try:
+                result = self.obs_queue.get(timeout=1)
+            except Empty:
+                if self.isaac_lab_process.is_alive():
+                    continue
+                self.close()
+                raise RuntimeError(
+                    f"IsaacLab environment subprocess exited: {self.isaac_lab_process.exitcode}"
+                ) from None
+            if isinstance(result, Exception):
+                self.close()
+                raise result
+            return result
+
+    def reset(self, seed=None, env_ids=None, *, options=None):
+        """Forward task reset options without changing legacy reset calls."""
+        if self.parent_remote.closed:
+            raise RuntimeError("IsaacLab environment subprocess is closed")
         self.parent_remote.send("reset")
-        self.reset_idx.put((env_ids, seed))
-        obs, info = self.obs_queue.get()
-        return obs, info
+        self.reset_idx.put((env_ids, seed, options))
+        return self._receive()
 
     def step(self, action: torch.Tensor):
-        """
-        action : (bs, action_dim)
-        """
+        """Forward batched actions or action chunks without reshaping."""
+        if self.parent_remote.closed:
+            raise RuntimeError("IsaacLab environment subprocess is closed")
         self.parent_remote.send("step")
         self.action_queue.put(action)
-        env_step_result = self.obs_queue.get()
-        return env_step_result
+        return self._receive()
 
     def close(self):
-        self.parent_remote.send("close")
-        self.isaac_lab_process.join()
-        self.isaac_lab_process.terminate()
+        """Release the child and queues; repeated calls are safe."""
+        if self.parent_remote.closed:
+            return
+        try:
+            self.parent_remote.send("close")
+        except (BrokenPipeError, EOFError, OSError):
+            pass
+        self.isaac_lab_process.join(timeout=5)
+        if self.isaac_lab_process.is_alive():
+            self.isaac_lab_process.terminate()
+            self.isaac_lab_process.join(timeout=5)
+        if self.isaac_lab_process.is_alive():
+            self.isaac_lab_process.kill()
+            self.isaac_lab_process.join()
+        self.parent_remote.close()
+        self.child_remote.close()
+        for queue in (self.action_queue, self.obs_queue, self.reset_idx):
+            queue.close()
+            queue.cancel_join_thread()
 
     def device(self):
+        """Return the child environment's device."""
+        if self.parent_remote.closed:
+            raise RuntimeError("IsaacLab environment subprocess is closed")
         self.parent_remote.send("device")
-        return self.parent_remote.recv()
+        return self._receive()
