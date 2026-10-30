@@ -208,7 +208,62 @@ def convert_to_isaaclab_stack_cube_action(
     return action_array
 
 
+def convert_h2_sharpa_wm_obs_to_gr00t_format(env_obs):
+    """Map the native H2/Sharpa 7+7+22+22 state and left-head RGB to GR00T."""
+    images, states = env_obs["main_images"], env_obs["states"]
+    images = (
+        images.cpu().numpy() if isinstance(images, torch.Tensor) else np.asarray(images)
+    )
+    states = (
+        states.detach().cpu().numpy()
+        if isinstance(states, torch.Tensor)
+        else np.asarray(states)
+    )
+    if states.ndim != 2 or states.shape[1] != 58:
+        raise ValueError(f"H2/Sharpa expects states [B,58], got {states.shape}")
+    obs = {
+        "video.high": images[:, None],
+        "annotation.human.task_description": env_obs["task_descriptions"],
+    }
+    for name, start, end in (
+        ("left_arm", 0, 7),
+        ("right_arm", 7, 14),
+        ("left_hand", 14, 36),
+        ("right_hand", 36, 58),
+    ):
+        obs[f"state.{name}"] = states[:, None, start:end]
+    return obs
+
+
+def convert_to_h2_sharpa_action_n1d7(action_chunk, chunk_size=16):
+    """Keep decoded physical targets in the H2/Sharpa 58-joint order."""
+    return _convert_joint_actions_n1d7(action_chunk, chunk_size, 58)
+
+
+def _convert_joint_actions_n1d7(action_chunk, chunk_size, action_dim):
+    prefix = "action." if "action.left_arm" in action_chunk else ""
+    try:
+        left_arm = action_chunk[f"{prefix}left_arm"][:, :chunk_size]
+        right_arm = action_chunk[f"{prefix}right_arm"][:, :chunk_size]
+        left_hand = action_chunk[f"{prefix}left_hand"][:, :chunk_size]
+        right_hand = action_chunk[f"{prefix}right_hand"][:, :chunk_size]
+    except KeyError as e:
+        raise KeyError(
+            "Joint actions require left_arm / right_arm / "
+            "left_hand / right_hand, optionally prefixed with 'action.'; "
+            f"got keys {list(action_chunk.keys())}"
+        ) from e
+
+    action_array = np.concatenate([left_arm, right_arm, left_hand, right_hand], axis=-1)
+    if action_array.shape[-1] != action_dim:
+        raise ValueError(
+            f"Expected {action_dim}-D joint action, got {action_array.shape[-1]}"
+        )
+    return action_array
+
+
 OBS_CONVERSION = {
+    "h2_sharpa_wm": convert_h2_sharpa_wm_obs_to_gr00t_format,
     "maniskill": convert_maniskill_obs_to_gr00t_format,
     "libero": convert_libero_obs_to_gr00t_format,
     "isaaclab_stack_cube": convert_libero_obs_to_gr00t_format,
@@ -227,6 +282,7 @@ ACTION_CONVERSION_N1D6 = {
 }
 
 ACTION_CONVERSION_N1D7 = {
+    "h2_sharpa_wm": convert_to_h2_sharpa_action_n1d7,
     "libero": convert_to_libero_action_n1d7,
     "maniskill": convert_to_maniskill_action,
     "isaaclab_stack_cube": convert_to_isaaclab_stack_cube_action,

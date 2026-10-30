@@ -202,3 +202,4 @@ If you are starting from "I want to train on benchmark *X*", this is the right e
    GSEnv <embodied/gsenv>
    Genesis <embodied/genesis>
    Real-World Simulator <embodied/real_simulator>
+   Cosmos-Nano World Model <embodied/cosmos3_medical_pads>

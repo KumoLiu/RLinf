@@ -1,0 +1,17 @@
+# Additional inference/RL dependencies; keep the Cosmos CUDA stack intact.
+ray[default]>=2.47.0
+hydra-core<1.4.0.dev8
+albumentations==1.4.18
+albucore==0.0.17
+opencv-python-headless==4.12.0.88
+gymnasium==1.2.2
+lmdb==1.7.5
+msgpack-numpy==0.4.8
+sortedcontainers==2.4.0
+icmplib==3.0.4
+nvitop==1.6.2
+zstandard==0.25.0
+imageio[ffmpeg]==2.37.2
+tensorboard==2.20.0
+pip
+pytest

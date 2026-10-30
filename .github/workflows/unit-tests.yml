@@ -15,7 +15,7 @@ jobs:
           unset UV_DEFAULT_INDEX
           bash requirements/install.sh --no-flash-attn embodied --env dummy
           source .venv/bin/activate
-          uv pip install "transformers<=5.9.0"
+          uv pip install "transformers<=5.9.0" av
 
       - name: Run pytest
         timeout-minutes: 40
@@ -53,7 +53,8 @@ jobs:
           source .venv/bin/activate
           UV_TORCH_BACKEND=auto uv sync
           uv pip install gymnasium imageio opencv-python
-          uv pip install "transformers<=5.9.0"
+          UV_TORCH_BACKEND=auto uv pip install "torchvision==0.26.0"
+          uv pip install "transformers<=5.9.0" av
 
       - name: Run pytest
         timeout-minutes: 40
@@ -81,7 +82,7 @@ jobs:
           export UV_PYTHON_INSTALL_DIR=/workspace/dataset/.uv_python
           bash requirements/install.sh --platform amd --no-flash-attn embodied --env dummy
           source .venv/bin/activate
-          uv pip install "transformers<=5.9.0"
+          uv pip install "transformers<=5.9.0" av
 
       - name: Run unit tests
         timeout-minutes: 40
@@ -114,7 +115,7 @@ jobs:
           export UV_PYTHON_INSTALL_DIR=/workspace/dataset/.uv_python
           bash requirements/install.sh --platform ascend --no-flash-attn embodied --env dummy
           source .venv/bin/activate
-          uv pip install "transformers<=5.9.0"
+          uv pip install "transformers<=5.9.0" av
 
       - name: Run unit tests
         timeout-minutes: 120
@@ -149,7 +150,7 @@ jobs:
           export UV_PYTHON_INSTALL_DIR=/workspace/dataset/.uv_python
           bash requirements/install.sh --platform musa embodied --env dummy
           source .venv/bin/activate
-          uv pip install "transformers<=5.9.0"
+          uv pip install "transformers<=5.9.0" av
 
       - name: Run unit tests
         timeout-minutes: 60

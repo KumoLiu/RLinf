@@ -1096,7 +1096,9 @@ class GR00T_N1_7_ForRLActionPrediction(Gr00tN1d7, BasePolicy):
         is_numpy = isinstance(raw_action, np.ndarray)
         raw_tensor = torch.from_numpy(raw_action) if is_numpy else raw_action
         noise = torch.randn_like(raw_tensor) * noise_scale
-        raw_tensor = (raw_tensor + noise).clamp(-1.0, 1.0)
+        raw_tensor = raw_tensor + noise
+        if self.obs_converter_type != "h2_sharpa_wm":
+            raw_tensor = raw_tensor.clamp(-1.0, 1.0)
         return raw_tensor.numpy() if is_numpy else raw_tensor
 
     def apply_transforms(self, obs: dict) -> dict:

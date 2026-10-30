@@ -38,6 +38,7 @@ _REGISTRY: dict[str, type] = {}
 #: Canonical ``backend`` name to the module that calls :func:`register_backend`
 #: on import. Looked up one name at a time so unused backends stay unloaded.
 _BUILTIN_MODULES: dict[str, str] = {
+    "cosmos3": "rlinf.envs.sim.world_model.backend.cosmos3",
     "wan": "rlinf.envs.sim.world_model.backend.wan",
     "opensora": "rlinf.envs.sim.world_model.backend.opensora",
 }

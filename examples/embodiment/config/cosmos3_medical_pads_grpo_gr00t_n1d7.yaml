@@ -1,0 +1,168 @@
+defaults:
+  - env/cosmos3_medical_pads@env.train
+  - env/cosmos3_medical_pads@env.eval
+  - model/gr00t_n1d7@actor.model
+  - hybrid_engines/fsdp@actor.fsdp_config
+  - weight_syncer/patch_syncer@weight_syncer
+  - override hydra/job_logging: stdout
+  - _self_
+
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+
+cluster:
+  num_nodes: 1
+  component_placement:
+    actor,env,rollout: ${oc.env:COSMOS3_GPUS,'0-7'}
+
+runner:
+  task_type: embodied
+  logger:
+    log_path: "../results"
+    project_name: rlinf
+    experiment_name: cosmos3_medical_pads_grpo_gr00t_n1d7
+    logger_backends: ["tensorboard"]
+  max_epochs: 1000
+  max_steps: 150
+  only_eval: false
+  per_worker_log: false
+  val_check_interval: 5
+  save_interval: 5
+  resume_dir: null
+  ckpt_path: null
+
+algorithm:
+  normalize_advantages: true
+  kl_penalty: kl
+  group_size: 8
+  reward_type: action_level
+  logprob_type: token_level
+  entropy_type: token_level
+  adv_type: grpo
+  loss_type: actor
+  loss_agg_func: token-mean
+  kl_beta: 0.0
+  entropy_bonus: 0
+  clip_ratio_high: 0.28
+  clip_ratio_low: 0.2
+  clip_ratio_c: 3.0
+  value_clip: 0.2
+  huber_delta: 10.0
+  gamma: 0.99
+  gae_lambda: 0.95
+  reward_coef: 1.0
+  filter_rewards: false
+  log_group_success_metrics: true
+
+env:
+  group_name: EnvGroup
+  train:
+    seed: 42
+    rollout_epoch: 2
+    total_num_envs: 64
+    use_rel_reward: true
+    ignore_terminations: false
+    num_inference_steps: 30
+    balanced_quality_sampling: true
+    balanced_failure_qualities: [imperfect1, imperfect2, imperfect3]
+    terminal_streak_frames: 30
+    timeout_success_if_final_success: true
+    enable_kir: false
+    group_size: ${algorithm.group_size}
+    max_episode_steps: 480
+    max_steps_per_rollout_epoch: 480
+    reward_coef: ${algorithm.reward_coef}
+    auto_reset: false
+    enable_offload: true
+    use_fixed_reset_state_ids: false
+    video_cfg:
+      save_video: false
+      fps: 30
+      info_on_video: true
+      video_base_dir: ${runner.logger.log_path}/video/train
+  eval:
+    seed: 42
+    split: val
+    evaluation_result_dir: ${runner.logger.log_path}/episodes
+    rollout_epoch: 1
+    total_num_envs: 64
+    num_inference_steps: 30
+    enable_kir: false
+    group_size: 1
+    max_episode_steps: 480
+    max_steps_per_rollout_epoch: 480
+    auto_reset: false
+    ignore_terminations: false
+    terminal_streak_frames: 30
+    timeout_success_if_final_success: true
+    is_eval: true
+    use_fixed_reset_state_ids: true
+    eval_unique_episodes: true
+    enable_offload: true
+    video_cfg:
+      save_video: true
+      fps: 30
+      info_on_video: true
+      video_base_dir: ${runner.logger.log_path}/video/eval
+
+rollout:
+  group_name: RolloutGroup
+  generation_backend: huggingface
+  enable_offload: true
+  pipeline_stage_num: 1
+  sampling_params:
+    do_sample: true
+    temperature_train: 1.0
+    temperature_eval: 0.6
+    top_k: 50
+    top_p: 1.0
+    repetition_penalty: 1.0
+  model: ${actor.model}
+
+actor:
+  group_name: ActorGroup
+  training_backend: fsdp
+  micro_batch_size: 8
+  global_batch_size: 128
+  seed: 1234
+  enable_offload: true
+  model:
+    model_type: gr00t_n1d7
+    model_path: ${oc.env:GR00T_MODEL_PATH}
+    backbone_model_path: ${oc.env:GR00T_BACKBONE_PATH,null}
+    embodiment_tag: new_embodiment
+    obs_converter_type: h2_sharpa_wm
+    action_dim: 58
+    num_action_chunks: 16
+    denoising_steps: 4
+    add_value_head: false
+    rl_head_config:
+      noise_level: 0.5
+      action_noise_scale: 0.0
+      noise_anneal: false
+  optim:
+    lr: 3.0e-6
+    value_lr: 1.0e-4
+    adam_beta1: 0.9
+    adam_beta2: 0.95
+    adam_eps: 1.0e-8
+    weight_decay: 0.01
+    clip_grad: 1.0
+  fsdp_config:
+    strategy: fsdp
+    sharding_strategy: full_shard
+    sync_module_states: false
+    gradient_checkpointing: true
+    use_orig_params: true
+    mixed_precision:
+      param_dtype: ${actor.model.precision}
+      reduce_dtype: ${actor.model.precision}
+      buffer_dtype: ${actor.model.precision}
+
+reward:
+  use_reward_model: false
+
+critic:
+  use_critic_model: false

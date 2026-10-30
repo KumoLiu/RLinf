@@ -349,6 +349,8 @@ def prepare_actions(
             raw_chunk_actions=raw_chunk_actions,
             model_type=model_type,
         )
+    elif env_type == SupportedEnvType.COSMOS3WM:
+        chunk_actions = raw_chunk_actions
     elif env_type == SupportedEnvType.WORLD_MODEL:
         # TODO: Implement prepare_actions_for_opensora_wm
         if wm_env_type == "libero":

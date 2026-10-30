@@ -144,7 +144,8 @@ class RecordVideo(gym.Wrapper):
                         continue
                     batches = self._split_image_source(image_src)
                     if batches:
-                        frames.append(batches[0])
+                        # A singleton observation can render an entire action chunk.
+                        frames.extend(batches if len(obs) == 1 else batches[:1])
                 return frames
             images = []
             for item in obs:

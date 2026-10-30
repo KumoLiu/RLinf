@@ -1,0 +1,59 @@
+env_type: cosmos3_wm
+backend: cosmos3
+wm_env_type: medical_pads
+task_suite_name: medical_pads
+total_num_envs: null
+auto_reset: false
+ignore_terminations: false
+max_episode_steps: 480
+max_steps_per_rollout_epoch: 480
+use_rel_reward: false
+reward_coef: 1.0
+seed: 0
+group_size: 1
+use_fixed_reset_state_ids: false
+is_eval: false
+eval_unique_episodes: false
+enable_kir: false
+enable_offload: true
+
+cosmos3_root: ${oc.env:COSMOS3_ROOT}
+model_path: ${oc.env:COSMOS3_WM_CHECKPOINT}
+config_file: ${oc.env:COSMOS3_WM_CONFIG,${.model_path}/../../config.yaml}
+pipeline_log_dir: ${runner.logger.log_path}/cosmos3
+initial_image_path: ${oc.env:H2_DATASET_PATH}
+split_path: ${.initial_image_path}/meta/split.json
+split: train
+episodes: null
+action_statistics: ${oc.env:COSMOS3_ACTION_STATS}
+video_key: observation.images.cam_left_high
+video_backend: pyav
+random_start_frame: false
+evaluation_result_dir: null
+chunk: 16
+condition_frame_length: 1
+num_frames: 17
+num_inference_steps: 30
+wm_batch_size: 1
+guidance: 1.0
+shift: 10.0
+image_size: [480, 640]
+action_dim: 58
+state_dim: 58
+
+reward_model:
+  type: ClassifierReward
+  from_pretrained: ${oc.env:CLASSIFIER_REWARD_CHECKPOINT}
+  config_file: ${oc.env:CLASSIFIER_REWARD_CONFIG,null}
+
+video_cfg:
+  save_video: false
+  fps: 30
+  info_on_video: true
+  video_base_dir: ${runner.logger.log_path}/video/train
+
+balanced_quality_sampling: false
+balanced_qualities: null
+balanced_failure_qualities: [imperfect1, imperfect2, imperfect3]
+terminal_streak_frames: 0
+timeout_success_if_final_success: false

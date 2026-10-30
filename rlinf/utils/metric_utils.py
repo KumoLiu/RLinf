@@ -268,6 +268,18 @@ def compute_group_success_metrics(
         ].item()
         for success_count in range(group_size + 1)
     }
+    metrics["group_reward_std_mean"] = (
+        grouped_rewards.float().std(dim=-1, unbiased=False).mean().item()
+    )
+    metrics["group_reward_equal_fraction"] = (
+        (
+            (grouped_rewards.max(dim=-1).values - grouped_rewards.min(dim=-1).values)
+            <= 1e-6
+        )
+        .float()
+        .mean()
+        .item()
+    )
     metrics["group_mixed_fraction"] = (
         1.0 - histogram[0] - histogram[group_size]
     ).item()
